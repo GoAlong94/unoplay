@@ -160,8 +160,79 @@ const Lobby = () => {
     }
   };
 
-  const startGame = () => {
-    navigate(`/game/${id}`);
+  const startGame = async () => {
+    if (!lobby || !user || players.length < 2) return;
+
+    try {
+      // Create a new game with initial state
+      const { createDeck, shuffle, cardToString, stringToCard } = await import("@/lib/unoGame");
+      
+      const deck = shuffle(createDeck());
+      
+      // Deal 7 cards to each player
+      const hands: { [userId: string]: string[] } = {};
+      let deckIndex = 0;
+      
+      players.forEach((player) => {
+        hands[player.id] = deck.slice(deckIndex, deckIndex + 7);
+        deckIndex += 7;
+      });
+      
+      // Get first card for discard pile (ensure it's not a wild card)
+      let firstCard = deck[deckIndex];
+      while (firstCard.startsWith('WILD')) {
+        deckIndex++;
+        firstCard = deck[deckIndex];
+      }
+      deckIndex++;
+      
+      const remainingDeck = deck.slice(deckIndex);
+      
+      // Create game record
+      const { data: gameData, error: gameError } = await supabase
+        .from("games")
+        .insert({
+          lobby_id: id,
+          status: "in_progress",
+          current_card: firstCard,
+          current_color: stringToCard(firstCard).color,
+          direction: 1,
+          current_turn_user_id: players[0].id,
+          deck: remainingDeck,
+          discard_pile: [firstCard],
+        })
+        .select()
+        .single();
+
+      if (gameError) throw gameError;
+
+      // Create player hands
+      const handInserts = players.map((player, index) => ({
+        game_id: gameData.id,
+        user_id: player.id,
+        cards: hands[player.id],
+        position: index,
+        has_said_uno: false,
+      }));
+
+      const { error: handsError } = await supabase
+        .from("player_hands")
+        .insert(handInserts);
+
+      if (handsError) throw handsError;
+
+      // Update lobby status
+      await supabase
+        .from("lobbies")
+        .update({ status: "in_game" })
+        .eq("id", id);
+
+      toast.success("Game started!");
+      navigate(`/game/${id}`);
+    } catch (error: any) {
+      console.error("Error starting game:", error);
+      toast.error("Failed to start game");
+    }
   };
 
   if (!lobby) return null;

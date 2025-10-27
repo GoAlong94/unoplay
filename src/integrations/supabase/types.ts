@@ -53,6 +53,59 @@ export type Database = {
           },
         ]
       }
+      games: {
+        Row: {
+          created_at: string | null
+          current_card: string
+          current_color: string | null
+          current_turn_user_id: string
+          deck: Json
+          direction: number
+          discard_pile: Json
+          id: string
+          lobby_id: string
+          status: Database["public"]["Enums"]["game_status"]
+          updated_at: string | null
+          winner_id: string | null
+        }
+        Insert: {
+          created_at?: string | null
+          current_card: string
+          current_color?: string | null
+          current_turn_user_id: string
+          deck?: Json
+          direction?: number
+          discard_pile?: Json
+          id?: string
+          lobby_id: string
+          status?: Database["public"]["Enums"]["game_status"]
+          updated_at?: string | null
+          winner_id?: string | null
+        }
+        Update: {
+          created_at?: string | null
+          current_card?: string
+          current_color?: string | null
+          current_turn_user_id?: string
+          deck?: Json
+          direction?: number
+          discard_pile?: Json
+          id?: string
+          lobby_id?: string
+          status?: Database["public"]["Enums"]["game_status"]
+          updated_at?: string | null
+          winner_id?: string | null
+        }
+        Relationships: [
+          {
+            foreignKeyName: "games_lobby_id_fkey"
+            columns: ["lobby_id"]
+            isOneToOne: false
+            referencedRelation: "lobbies"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       lobbies: {
         Row: {
           code: string
@@ -127,6 +180,48 @@ export type Database = {
           },
         ]
       }
+      player_hands: {
+        Row: {
+          cards: Json
+          game_id: string
+          has_said_uno: boolean | null
+          id: string
+          position: number
+          user_id: string
+        }
+        Insert: {
+          cards?: Json
+          game_id: string
+          has_said_uno?: boolean | null
+          id?: string
+          position: number
+          user_id: string
+        }
+        Update: {
+          cards?: Json
+          game_id?: string
+          has_said_uno?: boolean | null
+          id?: string
+          position?: number
+          user_id?: string
+        }
+        Relationships: [
+          {
+            foreignKeyName: "player_hands_game_id_fkey"
+            columns: ["game_id"]
+            isOneToOne: false
+            referencedRelation: "games"
+            referencedColumns: ["id"]
+          },
+          {
+            foreignKeyName: "player_hands_user_id_fkey"
+            columns: ["user_id"]
+            isOneToOne: false
+            referencedRelation: "profiles"
+            referencedColumns: ["id"]
+          },
+        ]
+      }
       profiles: {
         Row: {
           avatar_url: string | null
@@ -156,7 +251,7 @@ export type Database = {
       [_ in never]: never
     }
     Enums: {
-      [_ in never]: never
+      game_status: "waiting" | "in_progress" | "completed"
     }
     CompositeTypes: {
       [_ in never]: never
@@ -283,6 +378,8 @@ export type CompositeTypes<
 
 export const Constants = {
   public: {
-    Enums: {},
+    Enums: {
+      game_status: ["waiting", "in_progress", "completed"],
+    },
   },
 } as const
