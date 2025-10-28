@@ -19,6 +19,7 @@ interface LobbyData {
 
 interface Player {
   id: string;
+  user_id: string;
   profiles: {
     username: string;
   };
@@ -73,7 +74,7 @@ const Lobby = () => {
     const fetchPlayers = async () => {
       const { data, error } = await supabase
         .from("lobby_players")
-        .select("id, profiles(username)")
+        .select("id, user_id, profiles(username)")
         .eq("lobby_id", id);
 
       if (!error && data) setPlayers(data as Player[]);
@@ -174,7 +175,7 @@ const Lobby = () => {
       let deckIndex = 0;
       
       players.forEach((player) => {
-        hands[player.id] = deck.slice(deckIndex, deckIndex + 7);
+        hands[player.user_id] = deck.slice(deckIndex, deckIndex + 7);
         deckIndex += 7;
       });
       
@@ -197,7 +198,7 @@ const Lobby = () => {
           current_card: firstCard,
           current_color: stringToCard(firstCard).color,
           direction: 1,
-          current_turn_user_id: players[0].id,
+          current_turn_user_id: players[0].user_id,
           deck: remainingDeck,
           discard_pile: [firstCard],
         })
@@ -209,8 +210,8 @@ const Lobby = () => {
       // Create player hands
       const handInserts = players.map((player, index) => ({
         game_id: gameData.id,
-        user_id: player.id,
-        cards: hands[player.id],
+        user_id: player.user_id,
+        cards: hands[player.user_id],
         position: index,
         has_said_uno: false,
       }));
