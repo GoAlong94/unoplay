@@ -64,6 +64,13 @@ const Home = () => {
         user_id: user.id,
       });
 
+      // Track analytics
+      await supabase.from("analytics_events").insert({
+        user_id: user.id,
+        event_type: "lobby_created",
+        metadata: { lobby_id: data.id },
+      });
+
       toast.success("Lobby created!");
       navigate(`/lobby/${data.id}`);
     } catch (error: any) {
@@ -86,19 +93,36 @@ const Home = () => {
 
       if (error) throw error;
 
-      const { error: joinError } = await supabase
+      // Check if already in lobby
+      const { data: existing } = await supabase
         .from("lobby_players")
-        .insert({
-          lobby_id: lobby.id,
-          user_id: user.id,
-        });
+        .select("id")
+        .eq("lobby_id", lobby.id)
+        .eq("user_id", user.id)
+        .maybeSingle();
 
-      if (joinError) throw joinError;
+      if (!existing) {
+        const { error: joinError } = await supabase
+          .from("lobby_players")
+          .insert({
+            lobby_id: lobby.id,
+            user_id: user.id,
+          });
+
+        if (joinError) throw joinError;
+      }
+
+      // Track analytics
+      await supabase.from("analytics_events").insert({
+        user_id: user.id,
+        event_type: "lobby_joined",
+        metadata: { lobby_id: lobby.id },
+      });
 
       toast.success("Joined lobby!");
       navigate(`/lobby/${lobby.id}`);
     } catch (error: any) {
-      toast.error("Invalid lobby code or already joined");
+      toast.error("Invalid lobby code");
     } finally {
       setLoading(false);
     }

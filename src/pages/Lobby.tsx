@@ -5,9 +5,11 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { ArrowLeft, Copy, Users, MessageSquare, Play } from "lucide-react";
+import { ArrowLeft, Copy, Users, MessageSquare, Play, Share2, MoreVertical, Crown, Volume2, VolumeX, UserX } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
+import { usePresence } from "@/hooks/use-presence";
 
 interface LobbyData {
   id: string;
@@ -20,6 +22,7 @@ interface LobbyData {
 interface Player {
   id: string;
   user_id: string;
+  muted: boolean;
   profiles: {
     username: string;
   };
@@ -42,6 +45,8 @@ const Lobby = () => {
   const [players, setPlayers] = useState<Player[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState("");
+  const { onlineUserIds } = usePresence(id, user?.id);
+  const hasStartedGameRef = useRef(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -54,7 +59,7 @@ const Lobby = () => {
   }, [navigate]);
 
   useEffect(() => {
-    if (!id) return;
+    if (!id || !user) return;
 
     const fetchLobby = async () => {
       const { data, error } = await supabase
@@ -69,15 +74,41 @@ const Lobby = () => {
         return;
       }
       setLobby(data);
+
+      // Check if game already exists
+      const { data: gameData } = await supabase
+        .from("games")
+        .select("id")
+        .eq("lobby_id", id)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      if (gameData) {
+        navigate(`/game/${id}`);
+        return;
+      }
     };
 
     const fetchPlayers = async () => {
       const { data, error } = await supabase
         .from("lobby_players")
-        .select("id, user_id, profiles(username)")
+        .select("id, user_id, muted, profiles(username)")
         .eq("lobby_id", id);
 
-      if (!error && data) setPlayers(data as Player[]);
+      if (!error && data) {
+        setPlayers(data as Player[]);
+        
+        // Ensure current user is in lobby
+        const isInLobby = data.some((p: any) => p.user_id === user.id);
+        if (!isInLobby) {
+          await supabase.from("lobby_players").insert({
+            lobby_id: id,
+            user_id: user.id,
+          });
+          fetchPlayers();
+        }
+      }
     };
 
     const fetchMessages = async () => {
@@ -132,17 +163,47 @@ const Lobby = () => {
       )
       .subscribe();
 
+    // Subscribe to lobby status changes
+    const lobbyChannel = supabase
+      .channel(`lobby-status-${id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "lobbies",
+          filter: `id=eq.${id}`,
+        },
+        (payload) => {
+          const updated = payload.new as LobbyData;
+          setLobby(updated);
+          if (updated.status === "in_game" && !hasStartedGameRef.current) {
+            hasStartedGameRef.current = true;
+            navigate(`/game/${id}`);
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       supabase.removeChannel(playersChannel);
       supabase.removeChannel(messagesChannel);
+      supabase.removeChannel(lobbyChannel);
     };
-  }, [id, navigate]);
+  }, [id, user, navigate]);
 
   const copyCode = () => {
     if (lobby) {
       navigator.clipboard.writeText(lobby.code);
       toast.success("Code copied to clipboard!");
     }
+  };
+
+  const shareWhatsApp = () => {
+    if (!lobby) return;
+    const url = window.location.href;
+    const message = `Join my game lobby "${lobby.name}"! Code: ${lobby.code}\n${url}`;
+    window.open(`https://wa.me/?text=${encodeURIComponent(message)}`, "_blank");
   };
 
   const sendMessage = async (e: React.FormEvent) => {
@@ -161,16 +222,36 @@ const Lobby = () => {
     }
   };
 
+  const toggleMute = async (playerId: string, currentMuted: boolean) => {
+    if (!lobby || lobby.created_by !== user?.id) return;
+    
+    await supabase
+      .from("lobby_players")
+      .update({ muted: !currentMuted })
+      .eq("id", playerId);
+    
+    toast.success(currentMuted ? "Player unmuted" : "Player muted");
+  };
+
+  const kickPlayer = async (playerId: string, playerUserId: string) => {
+    if (!lobby || lobby.created_by !== user?.id || playerUserId === user?.id) return;
+    
+    await supabase
+      .from("lobby_players")
+      .delete()
+      .eq("id", playerId);
+    
+    toast.success("Player kicked");
+  };
+
   const startGame = async () => {
-    if (!lobby || !user || players.length < 2) return;
+    if (!lobby || !user || players.length < 2 || lobby.created_by !== user.id) return;
 
     try {
-      // Create a new game with initial state
-      const { createDeck, shuffle, cardToString, stringToCard } = await import("@/lib/unoGame");
+      const { createDeck, shuffle, stringToCard } = await import("@/lib/unoGame");
       
       const deck = shuffle(createDeck());
       
-      // Deal 7 cards to each player
       const hands: { [userId: string]: string[] } = {};
       let deckIndex = 0;
       
@@ -179,7 +260,6 @@ const Lobby = () => {
         deckIndex += 7;
       });
       
-      // Get first card for discard pile (ensure it's not a wild card)
       let firstCard = deck[deckIndex];
       while (firstCard.startsWith('WILD')) {
         deckIndex++;
@@ -189,7 +269,6 @@ const Lobby = () => {
       
       const remainingDeck = deck.slice(deckIndex);
       
-      // Create game record
       const { data: gameData, error: gameError } = await supabase
         .from("games")
         .insert({
@@ -207,7 +286,6 @@ const Lobby = () => {
 
       if (gameError) throw gameError;
 
-      // Create player hands
       const handInserts = players.map((player, index) => ({
         game_id: gameData.id,
         user_id: player.user_id,
@@ -222,13 +300,20 @@ const Lobby = () => {
 
       if (handsError) throw handsError;
 
-      // Update lobby status
       await supabase
         .from("lobbies")
         .update({ status: "in_game" })
         .eq("id", id);
 
+      // Track analytics
+      await supabase.from("analytics_events").insert({
+        user_id: user.id,
+        event_type: "game_started",
+        metadata: { lobby_id: id, player_count: players.length },
+      });
+
       toast.success("Game started!");
+      hasStartedGameRef.current = true;
       navigate(`/game/${id}`);
     } catch (error: any) {
       console.error("Error starting game:", error);
@@ -237,6 +322,8 @@ const Lobby = () => {
   };
 
   if (!lobby) return null;
+
+  const isHost = lobby.created_by === user?.id;
 
   return (
     <div className="min-h-screen p-6">
@@ -251,6 +338,9 @@ const Lobby = () => {
             <code className="px-3 py-1 bg-card rounded font-mono text-lg">{lobby.code}</code>
             <Button variant="outline" size="icon" onClick={copyCode}>
               <Copy className="w-4 h-4" />
+            </Button>
+            <Button variant="outline" size="icon" onClick={shareWhatsApp}>
+              <Share2 className="w-4 h-4" />
             </Button>
           </div>
         </div>
@@ -274,9 +364,48 @@ const Lobby = () => {
                   {players.map((player) => (
                     <div
                       key={player.id}
-                      className="p-3 rounded-lg bg-background/50 border border-border"
+                      className="p-3 rounded-lg bg-background/50 border border-border flex items-center justify-between"
                     >
-                      <p className="font-medium">{player.profiles.username}</p>
+                      <div className="flex items-center gap-2">
+                        {player.user_id === lobby.created_by && (
+                          <Crown className="w-4 h-4 text-yellow-500" />
+                        )}
+                        <p className="font-medium">{player.profiles.username}</p>
+                        {onlineUserIds.includes(player.user_id) && (
+                          <span className="w-2 h-2 bg-green-500 rounded-full" />
+                        )}
+                      </div>
+                      {isHost && player.user_id !== user?.id && (
+                        <DropdownMenu>
+                          <DropdownMenuTrigger asChild>
+                            <Button variant="ghost" size="icon" className="h-8 w-8">
+                              <MoreVertical className="w-4 h-4" />
+                            </Button>
+                          </DropdownMenuTrigger>
+                          <DropdownMenuContent>
+                            <DropdownMenuItem onClick={() => toggleMute(player.id, player.muted)}>
+                              {player.muted ? (
+                                <>
+                                  <Volume2 className="w-4 h-4 mr-2" />
+                                  Unmute
+                                </>
+                              ) : (
+                                <>
+                                  <VolumeX className="w-4 h-4 mr-2" />
+                                  Mute
+                                </>
+                              )}
+                            </DropdownMenuItem>
+                            <DropdownMenuItem 
+                              onClick={() => kickPlayer(player.id, player.user_id)}
+                              className="text-destructive"
+                            >
+                              <UserX className="w-4 h-4 mr-2" />
+                              Kick
+                            </DropdownMenuItem>
+                          </DropdownMenuContent>
+                        </DropdownMenu>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -318,15 +447,19 @@ const Lobby = () => {
         </div>
 
         <div className="flex justify-center">
-          <Button
-            onClick={startGame}
-            size="lg"
-            className="gradient-primary shadow-glow"
-            disabled={players.length < 2}
-          >
-            <Play className="w-5 h-5 mr-2" />
-            Start Game
-          </Button>
+          {isHost ? (
+            <Button
+              onClick={startGame}
+              size="lg"
+              className="gradient-primary shadow-glow"
+              disabled={players.length < 2}
+            >
+              <Play className="w-5 h-5 mr-2" />
+              Start Game {players.length < 2 && "(Need 2+ players)"}
+            </Button>
+          ) : (
+            <p className="text-muted-foreground">Waiting for host to start the game...</p>
+          )}
         </div>
       </div>
     </div>
