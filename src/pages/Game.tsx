@@ -58,8 +58,12 @@ const Game = () => {
   useEffect(() => {
     if (!id || !user) return;
 
-    const fetchGame = async () => {
-      // Fetch game state
+    let gameChannel: any;
+    let handsChannel: any;
+    let mounted = true;
+
+    const init = async () => {
+      // 1) Get the latest game for this lobby
       const { data: gameData, error: gameError } = await supabase
         .from("games")
         .select("*")
@@ -67,6 +71,8 @@ const Game = () => {
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
+
+      if (!mounted) return;
 
       if (gameError) {
         console.error("Error fetching game:", gameError);
@@ -81,71 +87,87 @@ const Game = () => {
 
       setGame(gameData as GameState);
 
-      // Fetch all player hands with profiles
-      const { data: handsData, error: handsError } = await supabase
-        .from("player_hands")
-        .select("*, profiles(username)")
-        .eq("game_id", gameData.id)
-        .order("position");
+      const gameId = gameData.id as string;
 
-      if (!handsError && handsData) {
-        setAllPlayers(handsData as PlayerHand[]);
-        const myHandData = handsData.find((h) => h.user_id === user.id);
-        if (myHandData) setMyHand(myHandData as PlayerHand);
+      // 2) Wait until my hand exists, then fetch all hands
+      const fetchMyHand = async () => {
+        const { data: my, error: myErr } = await supabase
+          .from("player_hands")
+          .select("*, profiles(username)")
+          .eq("game_id", gameId)
+          .eq("user_id", user.id)
+          .maybeSingle();
+        if (myErr) {
+          // Most likely RLS until my row exists – just retry
+          return null;
+        }
+        return my as PlayerHand | null;
+      };
+
+      // Retry for up to 10s (20 x 500ms)
+      let retries = 20;
+      let my: PlayerHand | null = await fetchMyHand();
+      while (mounted && !my && retries-- > 0) {
+        await new Promise((r) => setTimeout(r, 500));
+        my = await fetchMyHand();
       }
+
+      if (!mounted) return;
+
+      if (my) {
+        setMyHand(my);
+      }
+
+      // Now that my hand exists, we can load everyone
+      const loadAllHands = async () => {
+        const { data: hands } = await supabase
+          .from("player_hands")
+          .select("*, profiles(username)")
+          .eq("game_id", gameId)
+          .order("position");
+        if (!mounted) return;
+        if (hands) {
+          setAllPlayers(hands as PlayerHand[]);
+          const mine = hands.find((h) => h.user_id === user.id);
+          if (mine) setMyHand(mine as PlayerHand);
+        }
+      };
+
+      await loadAllHands();
+
+      // 3) Realtime updates – scope to this lobby/game
+      gameChannel = supabase
+        .channel(`game-${id}`)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "games", filter: `lobby_id=eq.${id}` },
+          (payload) => {
+            if (!mounted) return;
+            setGame(payload.new as GameState);
+          }
+        )
+        .subscribe();
+
+      handsChannel = supabase
+        .channel(`hands-${gameId}`)
+        .on(
+          "postgres_changes",
+          { event: "*", schema: "public", table: "player_hands", filter: `game_id=eq.${gameId}` },
+          async () => {
+            await loadAllHands();
+          }
+        )
+        .subscribe();
     };
 
-    fetchGame();
-
-    // Subscribe to game updates
-    const gameChannel = supabase
-      .channel(`game-${id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "games",
-          filter: `lobby_id=eq.${id}`,
-        },
-        (payload) => {
-          setGame(payload.new as GameState);
-        }
-      )
-      .subscribe();
-
-    // Subscribe to hand updates
-    const handsChannel = supabase
-      .channel(`hands-${id}`)
-      .on(
-        "postgres_changes",
-        {
-          event: "*",
-          schema: "public",
-          table: "player_hands",
-        },
-        async () => {
-          // Refetch all hands
-          const { data: handsData } = await supabase
-            .from("player_hands")
-            .select("*, profiles(username)")
-            .eq("game_id", game?.id)
-            .order("position");
-
-          if (handsData) {
-            setAllPlayers(handsData as PlayerHand[]);
-            const myHandData = handsData.find((h) => h.user_id === user.id);
-            if (myHandData) setMyHand(myHandData as PlayerHand);
-          }
-        }
-      )
-      .subscribe();
+    init();
 
     return () => {
-      supabase.removeChannel(gameChannel);
-      supabase.removeChannel(handsChannel);
+      mounted = false;
+      if (gameChannel) supabase.removeChannel(gameChannel);
+      if (handsChannel) supabase.removeChannel(handsChannel);
     };
-  }, [id, user, navigate, game?.id]);
+  }, [id, user, navigate]);
 
   const isMyTurn = game?.current_turn_user_id === user?.id;
 
