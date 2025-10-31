@@ -93,7 +93,7 @@ const Game = () => {
       const fetchMyHand = async () => {
         const { data: my, error: myErr } = await supabase
           .from("player_hands")
-          .select("*, profiles(username)")
+          .select("*")
           .eq("game_id", gameId)
           .eq("user_id", user.id)
           .maybeSingle();
@@ -101,7 +101,7 @@ const Game = () => {
           // Most likely RLS until my row exists – just retry
           return null;
         }
-        return my as PlayerHand | null;
+        return (my ? ({ ...my, profiles: { username: "" } } as PlayerHand) : null);
       };
 
       // Retry for up to 10s (20 x 500ms)
