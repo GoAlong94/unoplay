@@ -44,6 +44,7 @@ const Game = () => {
   const [selectedCard, setSelectedCard] = useState<string | null>(null);
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [initError, setInitError] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -63,6 +64,8 @@ const Game = () => {
     let mounted = true;
 
     const init = async () => {
+      setInitError(null);
+
       // 1) Get the latest game for this lobby
       const { data: gameData, error: gameError } = await supabase
         .from("games")
@@ -76,6 +79,7 @@ const Game = () => {
 
       if (gameError) {
         console.error("Error fetching game:", gameError);
+        setInitError("Failed to load game state.");
         return;
       }
 
@@ -89,7 +93,7 @@ const Game = () => {
 
       const gameId = gameData.id as string;
 
-      // 2) Wait until my hand exists, then fetch all hands
+      // 2) Wait until my hand exists
       const fetchMyHand = async () => {
         const { data: my, error: myErr } = await supabase
           .from("player_hands")
@@ -97,11 +101,13 @@ const Game = () => {
           .eq("game_id", gameId)
           .eq("user_id", user.id)
           .maybeSingle();
+
         if (myErr) {
-          // Most likely RLS until my row exists – just retry
+          console.warn("fetchMyHand error:", myErr);
           return null;
         }
-        return (my ? ({ ...my, profiles: { username: "" } } as PlayerHand) : null);
+
+        return my ? ({ ...my, profiles: { username: "" } } as PlayerHand) : null;
       };
 
       // Retry for up to 10s (20 x 500ms)
@@ -114,23 +120,61 @@ const Game = () => {
 
       if (!mounted) return;
 
-      if (my) {
-        setMyHand(my);
+      if (!my) {
+        console.error("My hand did not load (not found or blocked by policies)");
+        setInitError("Couldn't load your hand. Please go back to the lobby and start again.");
+        return;
       }
 
-      // Now that my hand exists, we can load everyone
+      setMyHand(my);
+
+      // Now load everyone (best-effort; fallback if join fails)
       const loadAllHands = async () => {
-        const { data: hands } = await supabase
+        const { data: handsJoined, error: joinedErr } = await supabase
           .from("player_hands")
           .select("*, profiles(username)")
           .eq("game_id", gameId)
           .order("position");
+
         if (!mounted) return;
-        if (hands) {
-          setAllPlayers(hands as PlayerHand[]);
-          const mine = hands.find((h) => h.user_id === user.id);
+
+        if (!joinedErr && handsJoined) {
+          setAllPlayers(handsJoined as PlayerHand[]);
+          const mine = handsJoined.find((h) => h.user_id === user.id);
           if (mine) setMyHand(mine as PlayerHand);
+          return;
         }
+
+        console.warn("loadAllHands join failed, falling back:", joinedErr);
+
+        const { data: handsRaw, error: rawErr } = await supabase
+          .from("player_hands")
+          .select("*")
+          .eq("game_id", gameId)
+          .order("position");
+
+        if (!mounted) return;
+
+        if (rawErr || !handsRaw) {
+          console.error("loadAllHands raw failed:", rawErr);
+          return;
+        }
+
+        const userIds = Array.from(new Set(handsRaw.map((h: any) => h.user_id)));
+        const { data: profiles } = await supabase
+          .from("profiles")
+          .select("id, username")
+          .in("id", userIds);
+
+        const usernameById = new Map((profiles ?? []).map((p: any) => [p.id, p.username]));
+        const enriched = handsRaw.map((h: any) => ({
+          ...h,
+          profiles: { username: usernameById.get(h.user_id) ?? "Player" },
+        }));
+
+        setAllPlayers(enriched as PlayerHand[]);
+        const mine = enriched.find((h: any) => h.user_id === user.id);
+        if (mine) setMyHand(mine as PlayerHand);
       };
 
       await loadAllHands();
@@ -364,6 +408,29 @@ const Game = () => {
     
     toast.success("UNO!");
   };
+
+  if (initError) {
+    return (
+      <div className="min-h-screen flex items-center justify-center p-6">
+        <Card className="gradient-card border-border max-w-md w-full">
+          <CardHeader>
+            <CardTitle>Couldn't load game</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <p className="text-muted-foreground">{initError}</p>
+            <div className="flex gap-2">
+              <Button variant="outline" onClick={() => navigate(`/lobby/${id}`)}>
+                Back to Lobby
+              </Button>
+              <Button onClick={() => window.location.reload()} className="gradient-primary">
+                Retry
+              </Button>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
 
   if (!game || !myHand) {
     return (
