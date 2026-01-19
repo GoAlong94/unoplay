@@ -66,14 +66,39 @@ const Game = () => {
     const init = async () => {
       setInitError(null);
 
+      const toPromise = <T,>(thenable: { then: (onFulfilled: (v: any) => any, onRejected?: (e: any) => any) => any }) =>
+        new Promise<T>((resolve, reject) => thenable.then(resolve, reject));
+
+      const withTimeout = async <T,>(thenable: { then: (onFulfilled: (v: any) => any, onRejected?: (e: any) => any) => any }, ms: number, label: string): Promise<T> => {
+        const promise = toPromise<T>(thenable);
+        return await Promise.race([
+          promise,
+          new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+        ]);
+      };
+
       // 1) Get the latest game for this lobby
-      const { data: gameData, error: gameError } = await supabase
-        .from("games")
-        .select("*")
-        .eq("lobby_id", id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      let gameData: any = null;
+      let gameError: any = null;
+      try {
+        const res = await withTimeout(
+          supabase
+            .from("games")
+            .select("*")
+            .eq("lobby_id", id)
+            .order("created_at", { ascending: false })
+            .limit(1)
+            .maybeSingle(),
+          8000,
+          "Load game"
+        );
+        gameData = (res as any).data;
+        gameError = (res as any).error;
+      } catch (e: any) {
+        console.error("Error fetching game (timeout):", e);
+        setInitError("Network timeout while loading game.");
+        return;
+      }
 
       if (!mounted) return;
 
@@ -95,12 +120,25 @@ const Game = () => {
 
       // 2) Wait until my hand exists
       const fetchMyHand = async () => {
-        const { data: my, error: myErr } = await supabase
-          .from("player_hands")
-          .select("*")
-          .eq("game_id", gameId)
-          .eq("user_id", user.id)
-          .maybeSingle();
+        let my: any = null;
+        let myErr: any = null;
+        try {
+          const res = await withTimeout(
+            supabase
+              .from("player_hands")
+              .select("*")
+              .eq("game_id", gameId)
+              .eq("user_id", user.id)
+              .maybeSingle(),
+            8000,
+            "Load your hand"
+          );
+          my = (res as any).data;
+          myErr = (res as any).error;
+        } catch (e: any) {
+          console.warn("fetchMyHand timeout:", e);
+          return null;
+        }
 
         if (myErr) {
           console.warn("fetchMyHand error:", myErr);

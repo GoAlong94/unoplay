@@ -185,10 +185,31 @@ const Lobby = () => {
       )
       .subscribe();
 
+    // Fallback: if lobby status update fails, still navigate when a game is created
+    const gamesChannel = supabase
+      .channel(`lobby-games-${id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "INSERT",
+          schema: "public",
+          table: "games",
+          filter: `lobby_id=eq.${id}`,
+        },
+        () => {
+          if (!hasStartedGameRef.current) {
+            hasStartedGameRef.current = true;
+            navigate(`/game/${id}`);
+          }
+        }
+      )
+      .subscribe();
+
     return () => {
       supabase.removeChannel(playersChannel);
       supabase.removeChannel(messagesChannel);
       supabase.removeChannel(lobbyChannel);
+      supabase.removeChannel(gamesChannel);
     };
   }, [id, user, navigate]);
 
@@ -300,10 +321,14 @@ const Lobby = () => {
 
       if (handsError) throw handsError;
 
-      await supabase
-        .from("lobbies")
-        .update({ status: "in_game" })
-        .eq("id", id);
+       const { error: lobbyUpdateError } = await supabase
+         .from("lobbies")
+         .update({ status: "in_game" })
+         .eq("id", id);
+
+       if (lobbyUpdateError) {
+         console.error("Failed to update lobby status:", lobbyUpdateError);
+       }
 
       // Track analytics
       await supabase.from("analytics_events").insert({
