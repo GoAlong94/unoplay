@@ -11,6 +11,19 @@ import { UnoCard } from "@/components/UnoCard";
 import { InGameChat } from "@/components/InGameChat";
 import { canPlayCard, shuffle, createDeck, cardToString, stringToCard, type CardColor } from "@/lib/unoGame";
 
+interface GameStateRaw {
+  id: string;
+  lobby_id: string;
+  status: string;
+  current_card: string;
+  current_color: string | null;
+  direction: number;
+  current_turn_user_id: string;
+  deck: unknown;
+  discard_pile: unknown;
+  winner_id: string | null;
+}
+
 interface GameState {
   id: string;
   lobby_id: string;
@@ -29,6 +42,17 @@ interface LobbyData {
   created_by: string;
 }
 
+interface PlayerHandRaw {
+  id: string;
+  user_id: string;
+  cards: unknown;
+  position: number;
+  has_said_uno: boolean;
+  profiles?: {
+    username: string;
+  };
+}
+
 interface PlayerHand {
   id: string;
   user_id: string;
@@ -39,6 +63,32 @@ interface PlayerHand {
     username: string;
   };
 }
+
+// Helper to safely parse JSON arrays from database
+const parseJsonArray = (value: unknown): string[] => {
+  if (Array.isArray(value)) return value;
+  if (typeof value === 'string') {
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+};
+
+const normalizeGameState = (raw: GameStateRaw): GameState => ({
+  ...raw,
+  deck: parseJsonArray(raw.deck),
+  discard_pile: parseJsonArray(raw.discard_pile),
+});
+
+const normalizePlayerHand = (raw: PlayerHandRaw): PlayerHand => ({
+  ...raw,
+  cards: parseJsonArray(raw.cards),
+  profiles: raw.profiles ?? { username: 'Player' },
+});
 
 const Game = () => {
   const { id } = useParams();
@@ -123,7 +173,7 @@ const Game = () => {
         return;
       }
 
-      setGame(gameData as GameState);
+      setGame(normalizeGameState(gameData as GameStateRaw));
 
       const gameId = gameData.id as string;
 
@@ -154,7 +204,7 @@ const Game = () => {
           return null;
         }
 
-        return my ? ({ ...my, profiles: { username: "" } } as PlayerHand) : null;
+        return my ? normalizePlayerHand(my as PlayerHandRaw) : null;
       };
 
       // Retry for up to 10s (20 x 500ms)
@@ -186,9 +236,10 @@ const Game = () => {
         if (!mounted) return;
 
         if (!joinedErr && handsJoined) {
-          setAllPlayers(handsJoined as PlayerHand[]);
-          const mine = handsJoined.find((h) => h.user_id === user.id);
-          if (mine) setMyHand(mine as PlayerHand);
+          const normalized = (handsJoined as PlayerHandRaw[]).map(normalizePlayerHand);
+          setAllPlayers(normalized);
+          const mine = normalized.find((h) => h.user_id === user.id);
+          if (mine) setMyHand(mine);
           return;
         }
 
@@ -214,14 +265,16 @@ const Game = () => {
           .in("id", userIds);
 
         const usernameById = new Map((profiles ?? []).map((p: any) => [p.id, p.username]));
-        const enriched = handsRaw.map((h: any) => ({
-          ...h,
-          profiles: { username: usernameById.get(h.user_id) ?? "Player" },
-        }));
+        const enriched = handsRaw.map((h: any) => 
+          normalizePlayerHand({
+            ...h,
+            profiles: { username: usernameById.get(h.user_id) ?? "Player" },
+          })
+        );
 
-        setAllPlayers(enriched as PlayerHand[]);
-        const mine = enriched.find((h: any) => h.user_id === user.id);
-        if (mine) setMyHand(mine as PlayerHand);
+        setAllPlayers(enriched);
+        const mine = enriched.find((h) => h.user_id === user.id);
+        if (mine) setMyHand(mine);
       };
 
       await loadAllHands();
@@ -234,7 +287,7 @@ const Game = () => {
           { event: "*", schema: "public", table: "games", filter: `lobby_id=eq.${id}` },
           (payload) => {
             if (!mounted) return;
-            setGame(payload.new as GameState);
+            setGame(normalizeGameState(payload.new as GameStateRaw));
           }
         )
         .subscribe();
