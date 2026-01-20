@@ -135,28 +135,37 @@ export type Database = {
           code: string
           created_at: string | null
           created_by: string
+          game_time_minutes: number | null
           id: string
           max_players: number | null
           name: string
           status: string | null
+          turn_time_seconds: number | null
+          use_double_deck: boolean | null
         }
         Insert: {
           code: string
           created_at?: string | null
           created_by: string
+          game_time_minutes?: number | null
           id?: string
           max_players?: number | null
           name: string
           status?: string | null
+          turn_time_seconds?: number | null
+          use_double_deck?: boolean | null
         }
         Update: {
           code?: string
           created_at?: string | null
           created_by?: string
+          game_time_minutes?: number | null
           id?: string
           max_players?: number | null
           name?: string
           status?: string | null
+          turn_time_seconds?: number | null
+          use_double_deck?: boolean | null
         }
         Relationships: [
           {

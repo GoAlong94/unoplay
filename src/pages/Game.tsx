@@ -1,13 +1,14 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ArrowLeft, RotateCcw, RotateCw } from "lucide-react";
+import { ArrowLeft, RotateCcw, RotateCw, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import type { User } from "@supabase/supabase-js";
 import { UnoCard } from "@/components/UnoCard";
+import { InGameChat } from "@/components/InGameChat";
 import { canPlayCard, shuffle, createDeck, cardToString, stringToCard, type CardColor } from "@/lib/unoGame";
 
 interface GameState {
@@ -21,6 +22,11 @@ interface GameState {
   deck: string[];
   discard_pile: string[];
   winner_id: string | null;
+}
+
+interface LobbyData {
+  id: string;
+  created_by: string;
 }
 
 interface PlayerHand {
@@ -45,6 +51,9 @@ const Game = () => {
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [loading, setLoading] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
+  const [lobby, setLobby] = useState<LobbyData | null>(null);
+  const [autoRestartCountdown, setAutoRestartCountdown] = useState(20);
+  const countdownRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -447,6 +456,82 @@ const Game = () => {
     toast.success("UNO!");
   };
 
+  // Back to lobby - resets lobby status and deletes current game data
+  const backToLobby = useCallback(async () => {
+    if (!id || !game) return;
+    
+    setLoading(true);
+    try {
+      // Delete player hands for this game
+      await supabase
+        .from("player_hands")
+        .delete()
+        .eq("game_id", game.id);
+      
+      // Delete the game record
+      await supabase
+        .from("games")
+        .delete()
+        .eq("id", game.id);
+      
+      // Reset lobby status to waiting
+      await supabase
+        .from("lobbies")
+        .update({ status: "waiting" })
+        .eq("id", id);
+      
+      // Navigate to lobby
+      navigate(`/lobby/${id}`);
+    } catch (error) {
+      console.error("Error returning to lobby:", error);
+      toast.error("Failed to return to lobby");
+    } finally {
+      setLoading(false);
+    }
+  }, [id, game, navigate]);
+
+  // Auto-restart countdown effect for completed games
+  useEffect(() => {
+    if (game?.status !== "completed") {
+      setAutoRestartCountdown(20);
+      return;
+    }
+    
+    countdownRef.current = setInterval(() => {
+      setAutoRestartCountdown((prev) => {
+        if (prev <= 1) {
+          if (countdownRef.current) clearInterval(countdownRef.current);
+          backToLobby();
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (countdownRef.current) clearInterval(countdownRef.current);
+    };
+  }, [game?.status, backToLobby]);
+
+  // Fetch lobby data for host check
+  useEffect(() => {
+    if (!id) return;
+    
+    const fetchLobby = async () => {
+      const { data } = await supabase
+        .from("lobbies")
+        .select("id, created_by")
+        .eq("id", id)
+        .single();
+      
+      if (data) setLobby(data);
+    };
+    
+    fetchLobby();
+  }, [id]);
+
+  const isHost = lobby?.created_by === user?.id;
+
   if (initError) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
@@ -494,13 +579,24 @@ const Game = () => {
             <p className="text-2xl font-bold text-primary">
               {winner?.profiles.username} wins!
             </p>
+            
+            {/* Auto-restart countdown */}
+            <div className="flex items-center justify-center gap-2 text-muted-foreground">
+              <RefreshCw className="w-4 h-4 animate-spin" />
+              <span>Returning to lobby in {autoRestartCountdown}s...</span>
+            </div>
+            
             <div className="flex gap-2 justify-center">
-              <Button onClick={() => navigate(`/lobby/${id}`)} className="gradient-primary">
-                Back to Lobby
+              <Button onClick={backToLobby} className="gradient-primary" disabled={loading}>
+                <ArrowLeft className="w-4 h-4 mr-2" />
+                {loading ? "Returning..." : "Back to Lobby Now"}
               </Button>
             </div>
           </CardContent>
         </Card>
+        
+        {/* In-game chat accessible on game over screen too */}
+        {user && <InGameChat lobbyId={id!} userId={user.id} />}
       </div>
     );
   }
@@ -632,6 +728,9 @@ const Game = () => {
           </div>
         </DialogContent>
       </Dialog>
+      
+      {/* In-game chat */}
+      {user && <InGameChat lobbyId={id!} userId={user.id} />}
     </div>
   );
 };

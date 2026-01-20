@@ -7,9 +7,10 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { toast } from "sonner";
-import { ArrowLeft, Copy, Users, MessageSquare, Play, Share2, MoreVertical, Crown, Volume2, VolumeX, UserX } from "lucide-react";
+import { ArrowLeft, Copy, Users, MessageSquare, Play, Share2, MoreVertical, Crown, Volume2, VolumeX, UserX, Settings } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 import { usePresence } from "@/hooks/use-presence";
+import { GameSettingsDialog } from "@/components/GameSettingsDialog";
 
 interface LobbyData {
   id: string;
@@ -47,6 +48,8 @@ const Lobby = () => {
   const [newMessage, setNewMessage] = useState("");
   const { onlineUserIds } = usePresence(id, user?.id);
   const hasStartedGameRef = useRef(false);
+  const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [isStarting, setIsStarting] = useState(false);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -265,13 +268,19 @@ const Lobby = () => {
     toast.success("Player kicked");
   };
 
-  const startGame = async () => {
+  const startGame = async (settings: { turnTimeSeconds: number; gameTimeMinutes: number; useDoubleDeck: boolean }) => {
     if (!lobby || !user || players.length < 2 || lobby.created_by !== user.id) return;
 
+    setIsStarting(true);
     try {
       const { createDeck, shuffle, stringToCard } = await import("@/lib/unoGame");
       
-      const deck = shuffle(createDeck());
+      // Create deck(s) based on settings
+      let deck = createDeck();
+      if (settings.useDoubleDeck && players.length >= 4) {
+        deck = [...deck, ...createDeck()];
+      }
+      deck = shuffle(deck);
       
       const hands: { [userId: string]: string[] } = {};
       let deckIndex = 0;
@@ -289,6 +298,16 @@ const Lobby = () => {
       deckIndex++;
       
       const remainingDeck = deck.slice(deckIndex);
+      
+      // Update lobby settings
+      await supabase
+        .from("lobbies")
+        .update({
+          turn_time_seconds: settings.turnTimeSeconds,
+          game_time_minutes: settings.gameTimeMinutes,
+          use_double_deck: settings.useDoubleDeck,
+        })
+        .eq("id", id);
       
       const { data: gameData, error: gameError } = await supabase
         .from("games")
@@ -334,15 +353,24 @@ const Lobby = () => {
       await supabase.from("analytics_events").insert({
         user_id: user.id,
         event_type: "game_started",
-        metadata: { lobby_id: id, player_count: players.length },
+        metadata: { 
+          lobby_id: id, 
+          player_count: players.length,
+          turn_time: settings.turnTimeSeconds,
+          game_time: settings.gameTimeMinutes,
+          double_deck: settings.useDoubleDeck,
+        },
       });
 
       toast.success("Game started!");
       hasStartedGameRef.current = true;
+      setShowSettingsDialog(false);
       navigate(`/game/${id}`);
     } catch (error: any) {
       console.error("Error starting game:", error);
       toast.error("Failed to start game");
+    } finally {
+      setIsStarting(false);
     }
   };
 
@@ -474,7 +502,7 @@ const Lobby = () => {
         <div className="flex justify-center">
           {isHost ? (
             <Button
-              onClick={startGame}
+              onClick={() => setShowSettingsDialog(true)}
               size="lg"
               className="gradient-primary shadow-glow"
               disabled={players.length < 2}
@@ -487,6 +515,15 @@ const Lobby = () => {
           )}
         </div>
       </div>
+      
+      {/* Game Settings Dialog */}
+      <GameSettingsDialog
+        open={showSettingsDialog}
+        onOpenChange={setShowSettingsDialog}
+        onStartGame={startGame}
+        playerCount={players.length}
+        loading={isStarting}
+      />
     </div>
   );
 };
