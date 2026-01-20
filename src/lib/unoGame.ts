@@ -26,6 +26,11 @@ export function cardToString(card: UnoCard): string {
 
 // Convert string format back to card object
 export function stringToCard(str: string): UnoCard {
+  // Defensive check for undefined/null/empty strings
+  if (!str || typeof str !== 'string') {
+    return { color: 'red', type: 'number', value: 0 }; // Safe fallback
+  }
+  
   if (str === 'WILD') return { color: null, type: 'wild' };
   if (str === 'WILD_D4') return { color: null, type: 'wild_draw4' };
   
