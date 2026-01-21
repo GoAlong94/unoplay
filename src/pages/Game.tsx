@@ -4,14 +4,16 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ArrowLeft, RefreshCw } from "lucide-react";
+import { ArrowLeft } from "lucide-react";
 import { toast } from "sonner";
 import type { User } from "@supabase/supabase-js";
 import { UnoCard } from "@/components/UnoCard";
 import { InGameChat } from "@/components/InGameChat";
 import { GameTimers } from "@/components/GameTimers";
-import { CircularPlayerLayout } from "@/components/CircularPlayerLayout";
-import { canPlayCard, shuffle, createDeck, cardToString, stringToCard, type CardColor } from "@/lib/unoGame";
+import { TablePlayerLayout } from "@/components/TablePlayerLayout";
+import { GameRankingScreen } from "@/components/GameRankingScreen";
+import { AutoPlayToggle } from "@/components/AutoPlayToggle";
+import { canPlayCard, shuffle, cardToString, stringToCard, type CardColor } from "@/lib/unoGame";
 
 interface GameStateRaw {
   id: string;
@@ -107,7 +109,11 @@ const Game = () => {
   const [initError, setInitError] = useState<string | null>(null);
   const [lobby, setLobby] = useState<LobbyData | null>(null);
   const [autoRestartCountdown, setAutoRestartCountdown] = useState(20);
+  const [gameEndReason, setGameEndReason] = useState<"winner" | "timeout">("winner");
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Auto-play state
+  const [autoPlayEnabled, setAutoPlayEnabled] = useState(false);
   
   // Timer states
   const [turnTimeLeft, setTurnTimeLeft] = useState(30);
@@ -115,6 +121,7 @@ const Game = () => {
   const turnTimerRef = useRef<NodeJS.Timeout | null>(null);
   const gameTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastTurnUserRef = useRef<string | null>(null);
+  const autoPlayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -326,6 +333,37 @@ const Game = () => {
 
   const isMyTurn = game?.current_turn_user_id === user?.id;
 
+  // Auto-play a card (finds best playable card or draws)
+  const autoPlay = useCallback(async () => {
+    if (!game || !myHand || loading) return;
+    
+    // Find a playable card
+    const playableCard = myHand.cards.find(card => 
+      canPlayCard(card, game.current_card, game.current_color)
+    );
+    
+    if (playableCard) {
+      const cardObj = stringToCard(playableCard);
+      const isWild = cardObj.type === "wild" || cardObj.type === "wild_draw4";
+      
+      if (isWild) {
+        // Pick the most common color in hand for wild cards
+        const colorCounts: Record<string, number> = { red: 0, blue: 0, green: 0, yellow: 0 };
+        myHand.cards.forEach(c => {
+          const co = stringToCard(c);
+          if (co.color) colorCounts[co.color]++;
+        });
+        const bestColor = (Object.entries(colorCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || 'red') as CardColor;
+        await playCard(playableCard, bestColor);
+      } else {
+        await playCard(playableCard);
+      }
+    } else {
+      // No playable card, must draw
+      await drawCard();
+    }
+  }, [game, myHand, loading]);
+
   const playCard = async (card: string, chosenColor?: CardColor) => {
     if (!game || !myHand || !isMyTurn || loading) return;
 
@@ -432,6 +470,7 @@ const Game = () => {
       if (playerWins) {
         updateData.status = "completed";
         updateData.winner_id = user?.id;
+        setGameEndReason("winner");
         
         // Update lobby status
         await supabase
@@ -520,6 +559,38 @@ const Game = () => {
     toast.success("UNO!");
   };
 
+  // End game due to timeout with rankings
+  const endGameWithRankings = useCallback(async () => {
+    if (!game || game.status === "completed") return;
+    
+    setLoading(true);
+    try {
+      // Find player with fewest cards as winner
+      const sortedPlayers = [...allPlayers].sort((a, b) => a.cards.length - b.cards.length);
+      const winner = sortedPlayers[0];
+      
+      await supabase
+        .from("games")
+        .update({ 
+          status: "completed",
+          winner_id: winner?.user_id || null 
+        })
+        .eq("id", game.id);
+      
+      await supabase
+        .from("lobbies")
+        .update({ status: "waiting" })
+        .eq("id", id);
+      
+      setGameEndReason("timeout");
+      toast.info("⏱️ Time's up! Game ended.");
+    } catch (error) {
+      console.error("Error ending game:", error);
+    } finally {
+      setLoading(false);
+    }
+  }, [game, allPlayers, id]);
+
   // Back to lobby - resets lobby status and deletes current game data
   const backToLobby = useCallback(async () => {
     if (!id || !game) return;
@@ -599,7 +670,7 @@ const Game = () => {
     fetchLobby();
   }, [id]);
   
-  // Turn timer - resets when turn changes
+  // Turn timer - resets when turn changes AND handles auto-timeout
   useEffect(() => {
     if (!game || game.status === "completed") return;
     
@@ -621,14 +692,54 @@ const Game = () => {
       if (turnTimerRef.current) clearInterval(turnTimerRef.current);
     };
   }, [game?.current_turn_user_id, game?.status, lobby?.turn_time_seconds]);
+
+  // Auto-play when turn timer reaches 0 (only for current user's turn)
+  useEffect(() => {
+    if (!isMyTurn || game?.status === "completed" || loading) return;
+    
+    if (turnTimeLeft <= 0) {
+      // Clear any existing timeout
+      if (autoPlayTimeoutRef.current) {
+        clearTimeout(autoPlayTimeoutRef.current);
+      }
+      
+      // Auto-play after a brief delay
+      autoPlayTimeoutRef.current = setTimeout(() => {
+        toast.info("⏱️ Turn timed out - auto-playing...");
+        autoPlay();
+      }, 500);
+    }
+    
+    return () => {
+      if (autoPlayTimeoutRef.current) {
+        clearTimeout(autoPlayTimeoutRef.current);
+      }
+    };
+  }, [turnTimeLeft, isMyTurn, game?.status, loading, autoPlay]);
+
+  // Auto-play toggle - plays automatically when it's my turn
+  useEffect(() => {
+    if (!autoPlayEnabled || !isMyTurn || game?.status === "completed" || loading) return;
+    
+    // Small delay before auto-playing to let UI update
+    const timeout = setTimeout(() => {
+      autoPlay();
+    }, 1000);
+    
+    return () => clearTimeout(timeout);
+  }, [autoPlayEnabled, isMyTurn, game?.status, loading, autoPlay]);
   
-  // Game timer - counts down overall game time
+  // Game timer - counts down overall game time AND ends game when it hits 0
   useEffect(() => {
     if (!game || game.status === "completed") return;
     
     gameTimerRef.current = setInterval(() => {
       setGameTimeLeft((prev) => {
-        if (prev <= 0) return 0;
+        if (prev <= 1) {
+          // Game time is up - end the game
+          endGameWithRankings();
+          return 0;
+        }
         return prev - 1;
       });
     }, 1000);
@@ -636,7 +747,7 @@ const Game = () => {
     return () => {
       if (gameTimerRef.current) clearInterval(gameTimerRef.current);
     };
-  }, [game?.status]);
+  }, [game?.status, endGameWithRankings]);
 
   const isHost = lobby?.created_by === user?.id;
 
@@ -675,96 +786,97 @@ const Game = () => {
   }
 
   if (game.status === "completed") {
-    const winner = allPlayers.find((p) => p.user_id === game.winner_id);
     return (
-      <div className="min-h-screen p-6 flex items-center justify-center">
-        <Card className="gradient-card border-border shadow-glow max-w-md w-full">
-          <CardHeader>
-            <CardTitle className="text-center text-3xl">Game Over!</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4 text-center">
-            <div className="text-6xl">🏆</div>
-            <p className="text-2xl font-bold text-primary">
-              {winner?.profiles.username} wins!
-            </p>
-            
-            {/* Auto-restart countdown */}
-            <div className="flex items-center justify-center gap-2 text-muted-foreground">
-              <RefreshCw className="w-4 h-4 animate-spin" />
-              <span>Returning to lobby in {autoRestartCountdown}s...</span>
-            </div>
-            
-            <div className="flex gap-2 justify-center">
-              <Button onClick={backToLobby} className="gradient-primary" disabled={loading}>
-                <ArrowLeft className="w-4 h-4 mr-2" />
-                {loading ? "Returning..." : "Back to Lobby Now"}
-              </Button>
-            </div>
-          </CardContent>
-        </Card>
-        
+      <>
+        <GameRankingScreen
+          players={allPlayers}
+          winnerId={game.winner_id}
+          gameEndReason={gameEndReason}
+          autoRestartCountdown={autoRestartCountdown}
+          onBackToLobby={backToLobby}
+          loading={loading}
+        />
         {/* In-game chat accessible on game over screen too */}
         {user && <InGameChat lobbyId={id!} userId={user.id} />}
-      </div>
+      </>
     );
   }
 
-  const currentPlayer = allPlayers.find((p) => p.user_id === game.current_turn_user_id);
-
   return (
-    <div className="min-h-screen p-4 md:p-6">
+    <div className="min-h-screen p-4 md:p-6 bg-gradient-to-b from-background to-muted/20">
       <div className="max-w-7xl mx-auto space-y-4">
-        {/* Header with Back button and Timers */}
+        {/* Header with Back button, Auto-play toggle, and Timers */}
         <div className="flex items-center justify-between flex-wrap gap-4">
           <Button variant="outline" size="sm" onClick={backToLobby} disabled={loading}>
             <ArrowLeft className="w-4 h-4 mr-2" />
             Back to Lobby
           </Button>
           
-          {/* Timers */}
-          <GameTimers
-            turnTimeLeft={turnTimeLeft}
-            turnTimeTotal={lobby?.turn_time_seconds ?? 30}
-            gameTimeLeft={gameTimeLeft}
-            isMyTurn={isMyTurn}
-          />
+          <div className="flex items-center gap-3">
+            {/* Auto-play toggle */}
+            <AutoPlayToggle
+              enabled={autoPlayEnabled}
+              onToggle={setAutoPlayEnabled}
+            />
+            
+            {/* Timers */}
+            <GameTimers
+              turnTimeLeft={turnTimeLeft}
+              turnTimeTotal={lobby?.turn_time_seconds ?? 30}
+              gameTimeLeft={gameTimeLeft}
+              isMyTurn={isMyTurn}
+            />
+          </div>
         </div>
 
-        {/* Circular Player Layout */}
-        <CircularPlayerLayout
+        {/* Table Player Layout */}
+        <TablePlayerLayout
           players={allPlayers}
           currentUserId={user?.id ?? ""}
           currentTurnUserId={game.current_turn_user_id}
           direction={game.direction}
           hostId={lobby?.created_by}
+          autoPlayEnabled={autoPlayEnabled}
         />
 
         {/* Game Center */}
-        <Card className="gradient-card border-border shadow-glow">
+        <Card className="border-2 border-amber-900/50 bg-gradient-to-br from-emerald-900/30 to-emerald-800/20 shadow-xl">
           <CardContent className="p-6">
             <div className="flex items-center justify-center gap-8">
               {/* Draw Pile */}
               <div className="text-center space-y-2">
-                <div className="text-sm text-muted-foreground">Draw Pile</div>
+                <div className="text-sm text-muted-foreground font-medium">Draw Pile</div>
                 <Button
                   onClick={drawCard}
                   disabled={!isMyTurn || loading}
                   variant="outline"
-                  className="w-20 h-28 rounded-lg bg-card hover:bg-accent"
+                  className="w-20 h-28 rounded-xl bg-gradient-to-br from-gray-800 to-gray-900 border-2 border-gray-600 hover:border-primary hover:scale-105 transition-all shadow-lg"
                 >
                   <div className="text-center">
-                    <div className="text-2xl">🎴</div>
-                    <div className="text-xs">{game.deck.length}</div>
+                    <div className="text-3xl">🎴</div>
+                    <div className="text-sm font-bold text-primary">{game.deck.length}</div>
                   </div>
                 </Button>
               </div>
 
               {/* Current Card */}
               <div className="text-center space-y-2">
-                <div className="text-sm text-muted-foreground">Current Card</div>
-                <UnoCard card={game.current_card} size="lg" />
+                <div className="text-sm text-muted-foreground font-medium">Current Card</div>
+                <div className="transform hover:scale-105 transition-transform">
+                  <UnoCard card={game.current_card} size="lg" />
+                </div>
                 {game.current_color && (
-                  <div className="text-xs">Color: {game.current_color}</div>
+                  <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-card/80 border border-border">
+                    <div 
+                      className={`w-4 h-4 rounded-full ${
+                        game.current_color === 'red' ? 'bg-red-500' :
+                        game.current_color === 'blue' ? 'bg-blue-500' :
+                        game.current_color === 'green' ? 'bg-green-500' :
+                        'bg-yellow-500'
+                      }`}
+                    />
+                    <span className="text-xs font-medium capitalize">{game.current_color}</span>
+                  </div>
                 )}
               </div>
             </div>
@@ -772,28 +884,42 @@ const Game = () => {
         </Card>
 
         {/* My Hand */}
-        <Card className="gradient-card border-border">
-          <CardHeader>
+        <Card className="gradient-card border-border shadow-lg">
+          <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
-              <CardTitle>Your Hand</CardTitle>
+              <CardTitle className="flex items-center gap-2">
+                Your Hand
+                <span className="text-sm font-normal text-muted-foreground">
+                  ({myHand.cards.length} cards)
+                </span>
+              </CardTitle>
               {myHand.cards.length === 1 && !myHand.has_said_uno && (
-                <Button onClick={sayUno} variant="outline" size="sm" className="text-yellow-500">
-                  Say UNO!
+                <Button onClick={sayUno} variant="outline" size="sm" className="text-yellow-500 border-yellow-500 hover:bg-yellow-500/10 animate-pulse">
+                  Say UNO! 🔔
                 </Button>
               )}
             </div>
           </CardHeader>
           <CardContent>
             <div className="flex flex-wrap gap-2 justify-center">
-              {myHand.cards.map((card, index) => (
-                <UnoCard
-                  key={`${card}-${index}`}
-                  card={card}
-                  onClick={() => playCard(card)}
-                  disabled={!isMyTurn || loading || !canPlayCard(card, game.current_card, game.current_color)}
-                  size="md"
-                />
-              ))}
+              {myHand.cards.map((card, index) => {
+                const isPlayable = isMyTurn && !loading && canPlayCard(card, game.current_card, game.current_color);
+                return (
+                  <div
+                    key={`${card}-${index}`}
+                    className={`transform transition-all duration-200 ${
+                      isPlayable ? "hover:-translate-y-3 hover:scale-110 cursor-pointer" : "opacity-60"
+                    }`}
+                  >
+                    <UnoCard
+                      card={card}
+                      onClick={() => playCard(card)}
+                      disabled={!isPlayable}
+                      size="md"
+                    />
+                  </div>
+                );
+              })}
             </div>
           </CardContent>
         </Card>
@@ -810,11 +936,11 @@ const Game = () => {
               <Button
                 key={color}
                 onClick={() => selectedCard && playCard(selectedCard, color)}
-                className={`h-20 text-white font-bold ${
+                className={`h-20 text-white font-bold text-lg shadow-lg hover:scale-105 transition-transform ${
                   color === 'red' ? 'bg-red-600 hover:bg-red-700' :
                   color === 'blue' ? 'bg-blue-600 hover:bg-blue-700' :
                   color === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                  'bg-yellow-500 hover:bg-yellow-600'
+                  'bg-yellow-500 hover:bg-yellow-600 text-yellow-950'
                 }`}
               >
                 {color.toUpperCase()}
