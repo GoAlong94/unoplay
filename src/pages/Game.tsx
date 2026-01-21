@@ -4,11 +4,13 @@ import { supabase } from "@/integrations/supabase/client";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
-import { ArrowLeft, RotateCcw, RotateCw, RefreshCw } from "lucide-react";
+import { ArrowLeft, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import type { User } from "@supabase/supabase-js";
 import { UnoCard } from "@/components/UnoCard";
 import { InGameChat } from "@/components/InGameChat";
+import { GameTimers } from "@/components/GameTimers";
+import { CircularPlayerLayout } from "@/components/CircularPlayerLayout";
 import { canPlayCard, shuffle, createDeck, cardToString, stringToCard, type CardColor } from "@/lib/unoGame";
 
 interface GameStateRaw {
@@ -40,6 +42,8 @@ interface GameState {
 interface LobbyData {
   id: string;
   created_by: string;
+  turn_time_seconds: number | null;
+  game_time_minutes: number | null;
 }
 
 interface PlayerHandRaw {
@@ -104,6 +108,13 @@ const Game = () => {
   const [lobby, setLobby] = useState<LobbyData | null>(null);
   const [autoRestartCountdown, setAutoRestartCountdown] = useState(20);
   const countdownRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Timer states
+  const [turnTimeLeft, setTurnTimeLeft] = useState(30);
+  const [gameTimeLeft, setGameTimeLeft] = useState(30 * 60); // 30 minutes default
+  const turnTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const gameTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const lastTurnUserRef = useRef<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -566,22 +577,66 @@ const Game = () => {
     };
   }, [game?.status, backToLobby]);
 
-  // Fetch lobby data for host check
+  // Fetch lobby data for host check and timer settings
   useEffect(() => {
     if (!id) return;
     
     const fetchLobby = async () => {
       const { data } = await supabase
         .from("lobbies")
-        .select("id, created_by")
+        .select("id, created_by, turn_time_seconds, game_time_minutes")
         .eq("id", id)
         .single();
       
-      if (data) setLobby(data);
+      if (data) {
+        setLobby(data);
+        // Initialize timers based on lobby settings
+        setTurnTimeLeft(data.turn_time_seconds ?? 30);
+        setGameTimeLeft((data.game_time_minutes ?? 30) * 60);
+      }
     };
     
     fetchLobby();
   }, [id]);
+  
+  // Turn timer - resets when turn changes
+  useEffect(() => {
+    if (!game || game.status === "completed") return;
+    
+    // Reset turn timer when turn changes
+    if (lastTurnUserRef.current !== game.current_turn_user_id) {
+      lastTurnUserRef.current = game.current_turn_user_id;
+      setTurnTimeLeft(lobby?.turn_time_seconds ?? 30);
+    }
+    
+    // Countdown turn timer
+    turnTimerRef.current = setInterval(() => {
+      setTurnTimeLeft((prev) => {
+        if (prev <= 0) return 0;
+        return prev - 1;
+      });
+    }, 1000);
+    
+    return () => {
+      if (turnTimerRef.current) clearInterval(turnTimerRef.current);
+    };
+  }, [game?.current_turn_user_id, game?.status, lobby?.turn_time_seconds]);
+  
+  // Game timer - counts down overall game time
+  useEffect(() => {
+    if (!game || game.status === "completed") return;
+    
+    gameTimerRef.current = setInterval(() => {
+      setGameTimeLeft((prev) => {
+        if (prev <= 0) return 0;
+        return prev - 1;
+      });
+    }, 1000);
+    
+    return () => {
+      if (gameTimerRef.current) clearInterval(gameTimerRef.current);
+    };
+  }, [game?.status]);
 
   const isHost = lobby?.created_by === user?.id;
 
@@ -659,43 +714,30 @@ const Game = () => {
   return (
     <div className="min-h-screen p-4 md:p-6">
       <div className="max-w-7xl mx-auto space-y-4">
-        <div className="flex items-center justify-between">
-          <Button variant="outline" size="sm" onClick={() => navigate(`/lobby/${id}`)}>
+        {/* Header with Back button and Timers */}
+        <div className="flex items-center justify-between flex-wrap gap-4">
+          <Button variant="outline" size="sm" onClick={backToLobby} disabled={loading}>
             <ArrowLeft className="w-4 h-4 mr-2" />
-            Lobby
+            Back to Lobby
           </Button>
-          <div className="flex items-center gap-2">
-            {game.direction === 1 ? (
-              <RotateCw className="w-5 h-5 text-primary" />
-            ) : (
-              <RotateCcw className="w-5 h-5 text-primary" />
-            )}
-            <span className="text-sm text-muted-foreground">
-              {currentPlayer?.profiles.username}'s turn
-            </span>
-          </div>
+          
+          {/* Timers */}
+          <GameTimers
+            turnTimeLeft={turnTimeLeft}
+            turnTimeTotal={lobby?.turn_time_seconds ?? 30}
+            gameTimeLeft={gameTimeLeft}
+            isMyTurn={isMyTurn}
+          />
         </div>
 
-        {/* Other Players */}
-        <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
-          {allPlayers
-            .filter((p) => p.user_id !== user?.id)
-            .map((player) => (
-              <Card key={player.id} className={`gradient-card border-border ${player.user_id === game.current_turn_user_id ? 'ring-2 ring-primary' : ''}`}>
-                <CardContent className="p-4">
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium">{player.profiles.username}</span>
-                    <span className="text-2xl font-bold text-primary">
-                      {player.cards.length}
-                    </span>
-                  </div>
-                  {player.has_said_uno && player.cards.length === 1 && (
-                    <span className="text-xs text-yellow-500">UNO!</span>
-                  )}
-                </CardContent>
-              </Card>
-            ))}
-        </div>
+        {/* Circular Player Layout */}
+        <CircularPlayerLayout
+          players={allPlayers}
+          currentUserId={user?.id ?? ""}
+          currentTurnUserId={game.current_turn_user_id}
+          direction={game.direction}
+          hostId={lobby?.created_by}
+        />
 
         {/* Game Center */}
         <Card className="gradient-card border-border shadow-glow">
