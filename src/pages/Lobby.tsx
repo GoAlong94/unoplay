@@ -50,6 +50,7 @@ const Lobby = () => {
   const hasStartedGameRef = useRef(false);
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
+  const [lobbyGameStatus, setLobbyGameStatus] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -77,19 +78,24 @@ const Lobby = () => {
         return;
       }
       setLobby(data);
+      setLobbyGameStatus(data.status);
 
-      // Check if game already exists
-      const { data: gameData } = await supabase
-        .from("games")
-        .select("id")
-        .eq("lobby_id", id)
-        .order("created_at", { ascending: false })
-        .limit(1)
-        .maybeSingle();
+      // Check if there is an active (in_progress) game - redirect if so
+      if (data.status === "in_game") {
+        const { data: gameData } = await supabase
+          .from("games")
+          .select("id, status")
+          .eq("lobby_id", id)
+          .eq("status", "in_progress")
+          .order("created_at", { ascending: false })
+          .limit(1)
+          .maybeSingle();
 
-      if (gameData) {
-        navigate(`/game/${id}`);
-        return;
+        if (gameData) {
+          hasStartedGameRef.current = true;
+          navigate(`/game/${id}`);
+          return;
+        }
       }
     };
 
@@ -180,6 +186,11 @@ const Lobby = () => {
         (payload) => {
           const updated = payload.new as LobbyData;
           setLobby(updated);
+          setLobbyGameStatus(updated.status);
+          // Reset flag when game ends so next game navigation works
+          if (updated.status === "waiting") {
+            hasStartedGameRef.current = false;
+          }
           if (updated.status === "in_game" && !hasStartedGameRef.current) {
             hasStartedGameRef.current = true;
             navigate(`/game/${id}`);
