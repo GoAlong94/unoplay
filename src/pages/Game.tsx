@@ -121,14 +121,17 @@ const Game = () => {
   const turnTimerRef = useRef<NodeJS.Timeout | null>(null);
   const gameTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastTurnUserRef = useRef<string | null>(null);
-  const autoPlayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   // Prevent auto-play from firing twice in the same turn
   const hasActedThisTurnRef = useRef(false);
   // Prevent game timer from triggering endGame multiple times
   const gameEndedRef = useRef(false);
-  // Refs to always have latest lobby/user in timer callbacks (avoids stale closures)
+  // Refs to always have latest lobby/user/game/isMyTurn in timer callbacks (avoids stale closures)
   const lobbyRef = useRef<LobbyData | null>(null);
   const userRef = useRef<User | null>(null);
+  const isMyTurnRef = useRef(false);
+  const gameRef = useRef<GameState | null>(null);
+  const myHandRef = useRef<PlayerHand | null>(null);
+  const allPlayersRef = useRef<PlayerHand[]>([]);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -144,6 +147,10 @@ const Game = () => {
   // Keep refs in sync with latest state values (for use inside timer callbacks)
   useEffect(() => { lobbyRef.current = lobby; }, [lobby]);
   useEffect(() => { userRef.current = user; }, [user]);
+  useEffect(() => { gameRef.current = game; }, [game]);
+  useEffect(() => { myHandRef.current = myHand; }, [myHand]);
+  useEffect(() => { allPlayersRef.current = allPlayers; }, [allPlayers]);
+  useEffect(() => { isMyTurnRef.current = game?.current_turn_user_id === user?.id; }, [game?.current_turn_user_id, user?.id]);
 
   useEffect(() => {
     if (!id || !user) return;
@@ -345,24 +352,20 @@ const Game = () => {
 
   const isMyTurn = game?.current_turn_user_id === user?.id;
 
+  // Ref-based auto-play: reads game state from refs to avoid stale closures in timer callbacks
+  const autoPlayRef = useRef<() => Promise<void>>(async () => {});
+
   // Auto-play a card (finds best playable card or draws)
   const autoPlay = useCallback(async () => {
     if (!game || !myHand || loading || hasActedThisTurnRef.current) return;
-    
-    // Mark as acted immediately to prevent double-fire
     hasActedThisTurnRef.current = true;
-    
-    // Find a playable card
     const playableCard = myHand.cards.find(card => 
       canPlayCard(card, game.current_card, game.current_color)
     );
-    
     if (playableCard) {
       const cardObj = stringToCard(playableCard);
       const isWild = cardObj.type === "wild" || cardObj.type === "wild_draw4";
-      
       if (isWild) {
-        // Pick the most common color in hand for wild cards
         const colorCounts: Record<string, number> = { red: 0, blue: 0, green: 0, yellow: 0 };
         myHand.cards.forEach(c => {
           const co = stringToCard(c);
@@ -374,10 +377,12 @@ const Game = () => {
         await playCard(playableCard);
       }
     } else {
-      // No playable card, must draw
       await drawCard();
     }
   }, [game, myHand, loading]);
+
+  // Keep autoPlayRef always pointing to the latest autoPlay (so timer callbacks never get stale)
+  useEffect(() => { autoPlayRef.current = autoPlay; }, [autoPlay]);
 
   const playCard = async (card: string, chosenColor?: CardColor) => {
     if (!game || !myHand || !isMyTurn || loading) return;
@@ -624,10 +629,17 @@ const Game = () => {
     
     const isHostClient = lobby?.created_by === user?.id;
     
-    // Navigate everyone immediately
+    // If the game is still in progress, just navigate away - don't delete anything
+    // This allows players to rejoin by going back to /game/:id
+    if (game.status === "in_progress") {
+      navigate(`/lobby/${id}`);
+      return;
+    }
+    
+    // Game is completed - navigate everyone, host cleans up
     navigate(`/lobby/${id}`);
     
-    // Only host cleans up game data
+    // Only host cleans up game data when game is finished
     if (isHostClient) {
       try {
         await supabase
@@ -716,8 +728,27 @@ const Game = () => {
     
     turnTimerRef.current = setInterval(() => {
       setTurnTimeLeft((prev) => {
-        if (prev <= 0) return 0;
-        return prev - 1;
+        if (prev <= 0) {
+          // Timer already at 0 - trigger auto-play for the current user via ref (no stale closure)
+          if (!hasActedThisTurnRef.current && isMyTurnRef.current) {
+            hasActedThisTurnRef.current = true;
+            // Use setTimeout to avoid calling async inside setInterval callback
+            setTimeout(() => {
+              toast.info("⏱️ Turn timed out - auto-playing...");
+              autoPlayRef.current();
+            }, 100);
+          }
+          return 0;
+        }
+        const next = prev - 1;
+        if (next <= 0 && !hasActedThisTurnRef.current && isMyTurnRef.current) {
+          hasActedThisTurnRef.current = true;
+          setTimeout(() => {
+            toast.info("⏱️ Turn timed out - auto-playing...");
+            autoPlayRef.current();
+          }, 200);
+        }
+        return next;
       });
     }, 1000);
     
@@ -725,25 +756,6 @@ const Game = () => {
       if (turnTimerRef.current) clearInterval(turnTimerRef.current);
     };
   }, [game?.current_turn_user_id, game?.status, lobby?.turn_time_seconds]);
-
-  // Auto-play when turn timer reaches 0 (only for current user's turn)
-  useEffect(() => {
-    if (!isMyTurn || game?.status === "completed" || loading) return;
-    if (turnTimeLeft > 0) return;
-    if (hasActedThisTurnRef.current) return;
-    
-    // Clear any pending timeout
-    if (autoPlayTimeoutRef.current) clearTimeout(autoPlayTimeoutRef.current);
-    
-    autoPlayTimeoutRef.current = setTimeout(() => {
-      toast.info("⏱️ Turn timed out - auto-playing...");
-      autoPlay();
-    }, 500);
-    
-    return () => {
-      if (autoPlayTimeoutRef.current) clearTimeout(autoPlayTimeoutRef.current);
-    };
-  }, [turnTimeLeft, isMyTurn, game?.status, loading, autoPlay]);
 
   // Auto-play toggle - plays automatically when it's my turn
   useEffect(() => {

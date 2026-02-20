@@ -47,10 +47,11 @@ const Lobby = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [newMessage, setNewMessage] = useState("");
   const { onlineUserIds } = usePresence(id, user?.id);
-  const hasStartedGameRef = useRef(false);
+  const hasNavigatedRef = useRef(false);
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
   const [isStarting, setIsStarting] = useState(false);
   const [lobbyGameStatus, setLobbyGameStatus] = useState<string | null>(null);
+  const [activeGameId, setActiveGameId] = useState<string | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -92,7 +93,8 @@ const Lobby = () => {
           .maybeSingle();
 
         if (gameData) {
-          hasStartedGameRef.current = true;
+          setActiveGameId(gameData.id);
+          hasNavigatedRef.current = true;
           navigate(`/game/${id}`);
           return;
         }
@@ -187,12 +189,12 @@ const Lobby = () => {
           const updated = payload.new as LobbyData;
           setLobby(updated);
           setLobbyGameStatus(updated.status);
-          // Reset flag when game ends so next game navigation works
+          // Reset flag when game returns to waiting so next match navigation works
           if (updated.status === "waiting") {
-            hasStartedGameRef.current = false;
+            hasNavigatedRef.current = false;
           }
-          if (updated.status === "in_game" && !hasStartedGameRef.current) {
-            hasStartedGameRef.current = true;
+          if (updated.status === "in_game" && !hasNavigatedRef.current) {
+            hasNavigatedRef.current = true;
             navigate(`/game/${id}`);
           }
         }
@@ -211,8 +213,8 @@ const Lobby = () => {
           filter: `lobby_id=eq.${id}`,
         },
         () => {
-          if (!hasStartedGameRef.current) {
-            hasStartedGameRef.current = true;
+          if (!hasNavigatedRef.current) {
+            hasNavigatedRef.current = true;
             navigate(`/game/${id}`);
           }
         }
@@ -374,7 +376,7 @@ const Lobby = () => {
       });
 
       toast.success("Game started!");
-      hasStartedGameRef.current = true;
+      hasNavigatedRef.current = true;
       setShowSettingsDialog(false);
       navigate(`/game/${id}`);
     } catch (error: any) {
@@ -510,8 +512,19 @@ const Lobby = () => {
           </Card>
         </div>
 
-        <div className="flex justify-center">
-          {isHost ? (
+        <div className="flex justify-center gap-3 flex-wrap">
+          {/* Rejoin button if game is active */}
+          {lobbyGameStatus === "in_game" && (
+            <Button
+              onClick={() => navigate(`/game/${id}`)}
+              size="lg"
+              variant="outline"
+              className="border-primary text-primary hover:bg-primary/10"
+            >
+              🎮 Rejoin Active Game
+            </Button>
+          )}
+          {isHost && lobbyGameStatus !== "in_game" ? (
             <Button
               onClick={() => setShowSettingsDialog(true)}
               size="lg"
@@ -521,9 +534,9 @@ const Lobby = () => {
               <Play className="w-5 h-5 mr-2" />
               Start Game {players.length < 2 && "(Need 2+ players)"}
             </Button>
-          ) : (
+          ) : lobbyGameStatus !== "in_game" ? (
             <p className="text-muted-foreground">Waiting for host to start the game...</p>
-          )}
+          ) : null}
         </div>
       </div>
       
