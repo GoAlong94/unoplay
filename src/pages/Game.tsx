@@ -117,11 +117,18 @@ const Game = () => {
   
   // Timer states
   const [turnTimeLeft, setTurnTimeLeft] = useState(30);
-  const [gameTimeLeft, setGameTimeLeft] = useState(30 * 60); // 30 minutes default
+  const [gameTimeLeft, setGameTimeLeft] = useState(30 * 60);
   const turnTimerRef = useRef<NodeJS.Timeout | null>(null);
   const gameTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastTurnUserRef = useRef<string | null>(null);
   const autoPlayTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+  // Prevent auto-play from firing twice in the same turn
+  const hasActedThisTurnRef = useRef(false);
+  // Prevent game timer from triggering endGame multiple times
+  const gameEndedRef = useRef(false);
+  // Refs to always have latest lobby/user in timer callbacks (avoids stale closures)
+  const lobbyRef = useRef<LobbyData | null>(null);
+  const userRef = useRef<User | null>(null);
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
@@ -129,9 +136,14 @@ const Game = () => {
         navigate("/auth");
       } else {
         setUser(session.user);
+        userRef.current = session.user;
       }
     });
   }, [navigate]);
+
+  // Keep refs in sync with latest state values (for use inside timer callbacks)
+  useEffect(() => { lobbyRef.current = lobby; }, [lobby]);
+  useEffect(() => { userRef.current = user; }, [user]);
 
   useEffect(() => {
     if (!id || !user) return;
@@ -335,7 +347,10 @@ const Game = () => {
 
   // Auto-play a card (finds best playable card or draws)
   const autoPlay = useCallback(async () => {
-    if (!game || !myHand || loading) return;
+    if (!game || !myHand || loading || hasActedThisTurnRef.current) return;
+    
+    // Mark as acted immediately to prevent double-fire
+    hasActedThisTurnRef.current = true;
     
     // Find a playable card
     const playableCard = myHand.cards.find(card => 
@@ -383,6 +398,8 @@ const Game = () => {
       return;
     }
 
+    // Mark as acted so auto-play doesn't fire again this turn
+    hasActedThisTurnRef.current = true;
     setLoading(true);
 
     try {
@@ -498,6 +515,8 @@ const Game = () => {
   const drawCard = async () => {
     if (!game || !myHand || !isMyTurn || loading) return;
 
+    // Mark as acted so auto-play doesn't fire again this turn
+    hasActedThisTurnRef.current = true;
     setLoading(true);
 
     try {
@@ -559,76 +578,84 @@ const Game = () => {
     toast.success("UNO!");
   };
 
-  // End game due to timeout with rankings
+  // End game due to timeout with rankings - only host executes to avoid race
   const endGameWithRankings = useCallback(async () => {
     if (!game || game.status === "completed") return;
+    if (gameEndedRef.current) return;
     
-    setLoading(true);
-    try {
-      // Find player with fewest cards as winner
-      const sortedPlayers = [...allPlayers].sort((a, b) => a.cards.length - b.cards.length);
-      const winner = sortedPlayers[0];
-      
-      await supabase
-        .from("games")
-        .update({ 
-          status: "completed",
-          winner_id: winner?.user_id || null 
-        })
-        .eq("id", game.id);
-      
-      await supabase
-        .from("lobbies")
-        .update({ status: "waiting" })
-        .eq("id", id);
-      
-      setGameEndReason("timeout");
-      toast.info("⏱️ Time's up! Game ended.");
-    } catch (error) {
-      console.error("Error ending game:", error);
-    } finally {
-      setLoading(false);
+    const isHostClient = lobby?.created_by === user?.id;
+    
+    // All clients show the UI change; only host writes to DB
+    setGameEndReason("timeout");
+    
+    if (isHostClient) {
+      gameEndedRef.current = true;
+      setLoading(true);
+      try {
+        const sortedPlayers = [...allPlayers].sort((a, b) => a.cards.length - b.cards.length);
+        const winner = sortedPlayers[0];
+        
+        await supabase
+          .from("games")
+          .update({ 
+            status: "completed",
+            winner_id: winner?.user_id || null 
+          })
+          .eq("id", game.id);
+        
+        await supabase
+          .from("lobbies")
+          .update({ status: "waiting" })
+          .eq("id", id);
+        
+        toast.info("⏱️ Time's up! Game ended.");
+      } catch (error) {
+        console.error("Error ending game:", error);
+        gameEndedRef.current = false;
+      } finally {
+        setLoading(false);
+      }
     }
-  }, [game, allPlayers, id]);
+  }, [game, allPlayers, id, lobby, user]);
 
-  // Back to lobby - resets lobby status and deletes current game data
+  // Back to lobby - only host cleans up DB to avoid multi-client race condition
   const backToLobby = useCallback(async () => {
     if (!id || !game) return;
     
-    setLoading(true);
-    try {
-      // Delete player hands for this game
-      await supabase
-        .from("player_hands")
-        .delete()
-        .eq("game_id", game.id);
-      
-      // Delete the game record
-      await supabase
-        .from("games")
-        .delete()
-        .eq("id", game.id);
-      
-      // Reset lobby status to waiting
-      await supabase
-        .from("lobbies")
-        .update({ status: "waiting" })
-        .eq("id", id);
-      
-      // Navigate to lobby
-      navigate(`/lobby/${id}`);
-    } catch (error) {
-      console.error("Error returning to lobby:", error);
-      toast.error("Failed to return to lobby");
-    } finally {
-      setLoading(false);
+    const isHostClient = lobby?.created_by === user?.id;
+    
+    // Navigate everyone immediately
+    navigate(`/lobby/${id}`);
+    
+    // Only host cleans up game data
+    if (isHostClient) {
+      try {
+        await supabase
+          .from("player_hands")
+          .delete()
+          .eq("game_id", game.id);
+        
+        await supabase
+          .from("games")
+          .delete()
+          .eq("id", game.id);
+        
+        await supabase
+          .from("lobbies")
+          .update({ status: "waiting" })
+          .eq("id", id);
+      } catch (error) {
+        console.error("Error cleaning up game:", error);
+      }
     }
-  }, [id, game, navigate]);
+  }, [id, game, navigate, lobby, user]);
 
   // Auto-restart countdown effect for completed games
   useEffect(() => {
     if (game?.status !== "completed") {
       setAutoRestartCountdown(20);
+      // Reset game-ended guard when game restarts
+      gameEndedRef.current = false;
       return;
     }
     
@@ -670,17 +697,23 @@ const Game = () => {
     fetchLobby();
   }, [id]);
   
-  // Turn timer - resets when turn changes AND handles auto-timeout
+  // Turn timer - single interval that counts down, resets on turn change
   useEffect(() => {
     if (!game || game.status === "completed") return;
     
-    // Reset turn timer when turn changes
-    if (lastTurnUserRef.current !== game.current_turn_user_id) {
-      lastTurnUserRef.current = game.current_turn_user_id;
-      setTurnTimeLeft(lobby?.turn_time_seconds ?? 30);
+    const turnUserId = game.current_turn_user_id;
+    const turnSeconds = lobby?.turn_time_seconds ?? 30;
+    
+    // Reset turn timer and acted flag when the turn changes to a new player
+    if (lastTurnUserRef.current !== turnUserId) {
+      lastTurnUserRef.current = turnUserId;
+      hasActedThisTurnRef.current = false;
+      setTurnTimeLeft(turnSeconds);
     }
     
-    // Countdown turn timer
+    // Clear old interval before starting new one
+    if (turnTimerRef.current) clearInterval(turnTimerRef.current);
+    
     turnTimerRef.current = setInterval(() => {
       setTurnTimeLeft((prev) => {
         if (prev <= 0) return 0;
@@ -696,32 +729,27 @@ const Game = () => {
   // Auto-play when turn timer reaches 0 (only for current user's turn)
   useEffect(() => {
     if (!isMyTurn || game?.status === "completed" || loading) return;
+    if (turnTimeLeft > 0) return;
+    if (hasActedThisTurnRef.current) return;
     
-    if (turnTimeLeft <= 0) {
-      // Clear any existing timeout
-      if (autoPlayTimeoutRef.current) {
-        clearTimeout(autoPlayTimeoutRef.current);
-      }
-      
-      // Auto-play after a brief delay
-      autoPlayTimeoutRef.current = setTimeout(() => {
-        toast.info("⏱️ Turn timed out - auto-playing...");
-        autoPlay();
-      }, 500);
-    }
+    // Clear any pending timeout
+    if (autoPlayTimeoutRef.current) clearTimeout(autoPlayTimeoutRef.current);
+    
+    autoPlayTimeoutRef.current = setTimeout(() => {
+      toast.info("⏱️ Turn timed out - auto-playing...");
+      autoPlay();
+    }, 500);
     
     return () => {
-      if (autoPlayTimeoutRef.current) {
-        clearTimeout(autoPlayTimeoutRef.current);
-      }
+      if (autoPlayTimeoutRef.current) clearTimeout(autoPlayTimeoutRef.current);
     };
   }, [turnTimeLeft, isMyTurn, game?.status, loading, autoPlay]);
 
   // Auto-play toggle - plays automatically when it's my turn
   useEffect(() => {
     if (!autoPlayEnabled || !isMyTurn || game?.status === "completed" || loading) return;
+    if (hasActedThisTurnRef.current) return;
     
-    // Small delay before auto-playing to let UI update
     const timeout = setTimeout(() => {
       autoPlay();
     }, 1000);
@@ -729,15 +757,24 @@ const Game = () => {
     return () => clearTimeout(timeout);
   }, [autoPlayEnabled, isMyTurn, game?.status, loading, autoPlay]);
   
-  // Game timer - counts down overall game time AND ends game when it hits 0
+  // Game timer - counts down overall game time. Only host triggers the end.
   useEffect(() => {
     if (!game || game.status === "completed") return;
+    
+    // Clear any previous game timer
+    if (gameTimerRef.current) clearInterval(gameTimerRef.current);
     
     gameTimerRef.current = setInterval(() => {
       setGameTimeLeft((prev) => {
         if (prev <= 1) {
-          // Game time is up - end the game
-          endGameWithRankings();
+          if (gameTimerRef.current) clearInterval(gameTimerRef.current);
+          // Use refs to get latest lobby/user without stale closures
+          const isHostClient = lobbyRef.current?.created_by === userRef.current?.id;
+          if (isHostClient && !gameEndedRef.current) {
+            gameEndedRef.current = true;
+            // Defer to avoid calling state setter inside setState
+            setTimeout(() => endGameWithRankings(), 0);
+          }
           return 0;
         }
         return prev - 1;
@@ -747,7 +784,7 @@ const Game = () => {
     return () => {
       if (gameTimerRef.current) clearInterval(gameTimerRef.current);
     };
-  }, [game?.status, endGameWithRankings]);
+  }, [game?.status]);
 
   const isHost = lobby?.created_by === user?.id;
 
