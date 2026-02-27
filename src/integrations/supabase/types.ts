@@ -77,6 +77,30 @@ export type Database = {
           },
         ]
       }
+      friends: {
+        Row: {
+          created_at: string
+          friend_id: string
+          id: string
+          status: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          friend_id: string
+          id?: string
+          status?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          friend_id?: string
+          id?: string
+          status?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       games: {
         Row: {
           created_at: string | null
@@ -88,6 +112,9 @@ export type Database = {
           discard_pile: Json
           id: string
           lobby_id: string
+          pause_duration_minutes: number | null
+          pause_ready_players: Json | null
+          paused_at: string | null
           status: Database["public"]["Enums"]["game_status"]
           updated_at: string | null
           winner_id: string | null
@@ -102,6 +129,9 @@ export type Database = {
           discard_pile?: Json
           id?: string
           lobby_id: string
+          pause_duration_minutes?: number | null
+          pause_ready_players?: Json | null
+          paused_at?: string | null
           status?: Database["public"]["Enums"]["game_status"]
           updated_at?: string | null
           winner_id?: string | null
@@ -116,6 +146,9 @@ export type Database = {
           discard_pile?: Json
           id?: string
           lobby_id?: string
+          pause_duration_minutes?: number | null
+          pause_ready_players?: Json | null
+          paused_at?: string | null
           status?: Database["public"]["Enums"]["game_status"]
           updated_at?: string | null
           winner_id?: string | null
@@ -135,6 +168,7 @@ export type Database = {
           code: string
           created_at: string | null
           created_by: string
+          game_rules: Json | null
           game_time_minutes: number | null
           id: string
           max_players: number | null
@@ -147,6 +181,7 @@ export type Database = {
           code: string
           created_at?: string | null
           created_by: string
+          game_rules?: Json | null
           game_time_minutes?: number | null
           id?: string
           max_players?: number | null
@@ -159,6 +194,7 @@ export type Database = {
           code?: string
           created_at?: string | null
           created_by?: string
+          game_rules?: Json | null
           game_time_minutes?: number | null
           id?: string
           max_players?: number | null
@@ -257,6 +293,39 @@ export type Database = {
             referencedColumns: ["id"]
           },
         ]
+      }
+      player_stats: {
+        Row: {
+          cards_drawn: number
+          cards_played: number
+          favorite_color: string | null
+          games_played: number
+          games_won: number
+          uno_calls: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          cards_drawn?: number
+          cards_played?: number
+          favorite_color?: string | null
+          games_played?: number
+          games_won?: number
+          uno_calls?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          cards_drawn?: number
+          cards_played?: number
+          favorite_color?: string | null
+          games_played?: number
+          games_won?: number
+          uno_calls?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
       }
       profiles: {
         Row: {

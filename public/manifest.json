@@ -1,0 +1,17 @@
+{
+  "name": "UNO Play",
+  "short_name": "UNO",
+  "description": "Multiplayer UNO card game",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#7c3aed",
+  "icons": [
+    {
+      "src": "/favicon.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
