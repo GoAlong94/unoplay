@@ -281,16 +281,21 @@ const Lobby = () => {
     toast.success("Player kicked");
   };
 
-  const startGame = async (settings: { turnTimeSeconds: number; gameTimeMinutes: number; useDoubleDeck: boolean }) => {
+  const startGame = async (settings: any) => {
     if (!lobby || !user || players.length < 2 || lobby.created_by !== user.id) return;
 
     setIsStarting(true);
     try {
       const { createDeck, shuffle, stringToCard } = await import("@/lib/unoGame");
       
-      // Create deck(s) based on settings
+      // Determine player order (shuffle seats if enabled)
+      let orderedPlayers = [...players];
+      if (settings.shuffleSeats) {
+        orderedPlayers = shuffle([...players]);
+      }
+      
       let deck = createDeck();
-      if (settings.useDoubleDeck && players.length >= 4) {
+      if (settings.useDoubleDeck && orderedPlayers.length >= 4) {
         deck = [...deck, ...createDeck()];
       }
       deck = shuffle(deck);
@@ -298,7 +303,7 @@ const Lobby = () => {
       const hands: { [userId: string]: string[] } = {};
       let deckIndex = 0;
       
-      players.forEach((player) => {
+      orderedPlayers.forEach((player) => {
         hands[player.user_id] = deck.slice(deckIndex, deckIndex + 7);
         deckIndex += 7;
       });
@@ -311,16 +316,34 @@ const Lobby = () => {
       deckIndex++;
       
       const remainingDeck = deck.slice(deckIndex);
+
+      // Handle first card action effects
+      const firstCardObj = stringToCard(firstCard);
+      let firstTurnPlayerIdx = 0;
+      let direction = 1;
+
+      if (firstCardObj.type === "skip") {
+        firstTurnPlayerIdx = 1; // skip first player
+      } else if (firstCardObj.type === "reverse") {
+        direction = -1;
+        if (orderedPlayers.length === 2) firstTurnPlayerIdx = 1;
+      } else if (firstCardObj.type === "draw2") {
+        // First player draws 2, turn goes to second player
+        const victimCards = hands[orderedPlayers[0].user_id];
+        for (let i = 0; i < 2 && remainingDeck.length > 0; i++) {
+          victimCards.push(remainingDeck.shift()!);
+        }
+        firstTurnPlayerIdx = 1;
+      }
+
+      if (firstTurnPlayerIdx >= orderedPlayers.length) firstTurnPlayerIdx = 0;
       
-      // Update lobby settings
-      await supabase
-        .from("lobbies")
-        .update({
-          turn_time_seconds: settings.turnTimeSeconds,
-          game_time_minutes: settings.gameTimeMinutes,
-          use_double_deck: settings.useDoubleDeck,
-        })
-        .eq("id", id);
+      await supabase.from("lobbies").update({
+        turn_time_seconds: settings.turnTimeSeconds,
+        game_time_minutes: settings.gameTimeMinutes,
+        use_double_deck: settings.useDoubleDeck,
+        game_rules: settings.rules ?? null,
+      }).eq("id", id);
       
       const { data: gameData, error: gameError } = await supabase
         .from("games")
@@ -328,9 +351,9 @@ const Lobby = () => {
           lobby_id: id,
           status: "in_progress",
           current_card: firstCard,
-          current_color: stringToCard(firstCard).color,
-          direction: 1,
-          current_turn_user_id: players[0].user_id,
+          current_color: firstCardObj.color,
+          direction: direction,
+          current_turn_user_id: orderedPlayers[firstTurnPlayerIdx].user_id,
           deck: remainingDeck,
           discard_pile: [firstCard],
         })
@@ -339,7 +362,7 @@ const Lobby = () => {
 
       if (gameError) throw gameError;
 
-      const handInserts = players.map((player, index) => ({
+      const handInserts = orderedPlayers.map((player, index) => ({
         game_id: gameData.id,
         user_id: player.user_id,
         cards: hands[player.user_id],
@@ -347,28 +370,18 @@ const Lobby = () => {
         has_said_uno: false,
       }));
 
-      const { error: handsError } = await supabase
-        .from("player_hands")
-        .insert(handInserts);
-
+      const { error: handsError } = await supabase.from("player_hands").insert(handInserts);
       if (handsError) throw handsError;
 
-       const { error: lobbyUpdateError } = await supabase
-         .from("lobbies")
-         .update({ status: "in_game" })
-         .eq("id", id);
+      const { error: lobbyUpdateError } = await supabase.from("lobbies").update({ status: "in_game" }).eq("id", id);
+      if (lobbyUpdateError) console.error("Failed to update lobby status:", lobbyUpdateError);
 
-       if (lobbyUpdateError) {
-         console.error("Failed to update lobby status:", lobbyUpdateError);
-       }
-
-      // Track analytics
       await supabase.from("analytics_events").insert({
         user_id: user.id,
         event_type: "game_started",
         metadata: { 
           lobby_id: id, 
-          player_count: players.length,
+          player_count: orderedPlayers.length,
           turn_time: settings.turnTimeSeconds,
           game_time: settings.gameTimeMinutes,
           double_deck: settings.useDoubleDeck,
