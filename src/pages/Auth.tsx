@@ -31,25 +31,38 @@ const Auth = () => {
     e.preventDefault();
     setLoading(true);
 
-    try {
-      if (isLogin) {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        toast.success("Welcome back!");
-      } else {
-        const { error } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            data: { username },
-            emailRedirectTo: `${window.location.origin}/`
-          }
-        });
-        if (error) throw error;
-        toast.success("Account created! Welcome!");
+    const attempt = async (retries = 2): Promise<void> => {
+      try {
+        if (isLogin) {
+          const { error } = await supabase.auth.signInWithPassword({ email, password });
+          if (error) throw error;
+          toast.success("Welcome back!");
+        } else {
+          const { error } = await supabase.auth.signUp({
+            email,
+            password,
+            options: {
+              data: { username },
+              emailRedirectTo: `${window.location.origin}/`
+            }
+          });
+          if (error) throw error;
+          toast.success("Account created! Welcome!");
+        }
+      } catch (error: any) {
+        if (error.message === "Failed to fetch" && retries > 0) {
+          await new Promise(r => setTimeout(r, 1500));
+          return attempt(retries - 1);
+        }
+        const msg = error.message === "Failed to fetch"
+          ? "Network error – please check your connection and try again."
+          : error.message;
+        toast.error(msg);
       }
-    } catch (error: any) {
-      toast.error(error.message);
+    };
+
+    try {
+      await attempt();
     } finally {
       setLoading(false);
     }
