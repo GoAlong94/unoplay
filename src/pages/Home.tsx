@@ -6,7 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { toast } from "sonner";
-import { Gamepad2, Plus, Users, LogOut } from "lucide-react";
+import { Gamepad2, Plus, Users, LogOut, UserCircle, Trophy } from "lucide-react";
 import type { User } from "@supabase/supabase-js";
 
 const Home = () => {
@@ -162,10 +162,20 @@ const Home = () => {
               <p className="text-muted-foreground">Welcome back!</p>
             </div>
           </div>
-          <Button variant="outline" onClick={handleSignOut}>
-            <LogOut className="w-4 h-4 mr-2" />
-            Sign Out
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" onClick={() => navigate("/friends")}>
+              <Users className="w-4 h-4 mr-2" />
+              Friends
+            </Button>
+            <Button variant="outline" onClick={() => navigate("/profile")}>
+              <Trophy className="w-4 h-4 mr-2" />
+              Stats
+            </Button>
+            <Button variant="outline" onClick={handleSignOut}>
+              <LogOut className="w-4 h-4 mr-2" />
+              Sign Out
+            </Button>
+          </div>
         </div>
 
         <div className="grid md:grid-cols-2 gap-6">
