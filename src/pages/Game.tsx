@@ -5,10 +5,10 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { ArrowLeft, Pause, AlertTriangle } from "lucide-react";
+import { ArrowLeft, Pause, AlertTriangle, Sparkles } from "lucide-react";
 import { toast } from "sonner";
+import { AnimatePresence } from "framer-motion";
 import type { User } from "@supabase/supabase-js";
-import { UnoCard } from "@/components/UnoCard";
 import { InGameChat } from "@/components/InGameChat";
 import { GameTimers } from "@/components/GameTimers";
 import { TablePlayerLayout } from "@/components/TablePlayerLayout";
@@ -18,100 +18,55 @@ import { PauseOverlay } from "@/components/PauseOverlay";
 import { EmoticonThrower } from "@/components/EmoticonThrower";
 import { QuickChat } from "@/components/QuickChat";
 import { SoundToggle } from "@/components/SoundToggle";
-import { canPlayCard, shuffle, cardToString, stringToCard, type CardColor } from "@/lib/unoGame";
+import { SpectatorBanner } from "@/components/SpectatorBanner";
+import { AnimatedCard, AnimatedDiscardCard, AnimatedDrawPile } from "@/components/AnimatedCard";
+import { ActionLog } from "@/components/ActionLog";
+import { CosmeticsDialog } from "@/components/CosmeticsDialog";
+import { useGamePresence } from "@/hooks/use-game-presence";
+import { canPlayCard, shuffle, stringToCard, type CardColor } from "@/lib/unoGame";
 import { playCardSound, playDrawSound, playUnoSound, playTurnSound, playTimerWarning, playWinSound, playAttackSound, triggerHaptic } from "@/lib/sounds";
 import type { GameRules } from "@/components/GameSettingsDialog";
 
+// ── Types ──
 interface GameStateRaw {
-  id: string;
-  lobby_id: string;
-  status: string;
-  current_card: string;
-  current_color: string | null;
-  direction: number;
-  current_turn_user_id: string;
-  deck: unknown;
-  discard_pile: unknown;
-  winner_id: string | null;
-  paused_at: string | null;
-  pause_duration_minutes: number | null;
-  pause_ready_players: unknown;
+  id: string; lobby_id: string; status: string; current_card: string;
+  current_color: string | null; direction: number; current_turn_user_id: string;
+  deck: unknown; discard_pile: unknown; winner_id: string | null;
+  paused_at: string | null; pause_duration_minutes: number | null; pause_ready_players: unknown;
 }
-
 interface GameState {
-  id: string;
-  lobby_id: string;
-  status: string;
-  current_card: string;
-  current_color: string | null;
-  direction: number;
-  current_turn_user_id: string;
-  deck: string[];
-  discard_pile: string[];
-  winner_id: string | null;
-  paused_at: string | null;
-  pause_duration_minutes: number | null;
-  pause_ready_players: string[];
+  id: string; lobby_id: string; status: string; current_card: string;
+  current_color: string | null; direction: number; current_turn_user_id: string;
+  deck: string[]; discard_pile: string[]; winner_id: string | null;
+  paused_at: string | null; pause_duration_minutes: number | null; pause_ready_players: string[];
 }
-
-interface LobbyData {
-  id: string;
-  created_by: string;
-  turn_time_seconds: number | null;
-  game_time_minutes: number | null;
-  game_rules: GameRules | null;
-}
-
-interface PlayerHandRaw {
-  id: string;
-  user_id: string;
-  cards: unknown;
-  position: number;
-  has_said_uno: boolean;
-  profiles?: { username: string };
-}
-
-interface PlayerHand {
-  id: string;
-  user_id: string;
-  cards: string[];
-  position: number;
-  has_said_uno: boolean;
-  profiles: { username: string };
-}
+interface LobbyData { id: string; created_by: string; turn_time_seconds: number | null; game_time_minutes: number | null; game_rules: GameRules | null; }
+interface PlayerHandRaw { id: string; user_id: string; cards: unknown; position: number; has_said_uno: boolean; profiles?: { username: string }; }
+interface PlayerHand { id: string; user_id: string; cards: string[]; position: number; has_said_uno: boolean; profiles: { username: string }; }
 
 const parseJsonArray = (value: unknown): string[] => {
   if (Array.isArray(value)) return value;
-  if (typeof value === 'string') {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed) ? parsed : [];
-    } catch { return []; }
-  }
+  if (typeof value === 'string') { try { const p = JSON.parse(value); return Array.isArray(p) ? p : []; } catch { return []; } }
   return [];
 };
-
 const normalizeGameState = (raw: GameStateRaw): GameState => ({
-  ...raw,
-  deck: parseJsonArray(raw.deck),
-  discard_pile: parseJsonArray(raw.discard_pile),
-  pause_ready_players: parseJsonArray(raw.pause_ready_players),
+  ...raw, deck: parseJsonArray(raw.deck), discard_pile: parseJsonArray(raw.discard_pile), pause_ready_players: parseJsonArray(raw.pause_ready_players),
 });
-
 const normalizePlayerHand = (raw: PlayerHandRaw): PlayerHand => ({
-  ...raw,
-  cards: parseJsonArray(raw.cards),
-  profiles: raw.profiles ?? { username: 'Player' },
+  ...raw, cards: parseJsonArray(raw.cards), profiles: raw.profiles ?? { username: 'Player' },
 });
 
 const defaultRules: GameRules = {
-  catch_uno_penalty: true,
-  stacking: false,
-  force_play: true,
-  seven_zero_rule: false,
-  jump_in: false,
-  end_with_power_card: true,
-  draw_penalty_skip: true,
+  catch_uno_penalty: true, stacking: false, force_play: true, seven_zero_rule: false,
+  jump_in: false, end_with_power_card: true, draw_penalty_skip: true,
+};
+
+// ── Scoring helper ──
+const getCardPoints = (card: string): number => {
+  const c = stringToCard(card);
+  if (c.type === 'number') return c.value ?? 0;
+  if (c.type === 'skip' || c.type === 'reverse' || c.type === 'draw2') return 20;
+  return 50; // wild / wild_draw4
 };
 
 const Game = () => {
@@ -132,8 +87,11 @@ const Game = () => {
   const [autoPlayEnabled, setAutoPlayEnabled] = useState(false);
   const [showPauseDialog, setShowPauseDialog] = useState(false);
   const [pauseDuration, setPauseDuration] = useState("5");
-  
-  // Timer states
+  const [isSpectator, setIsSpectator] = useState(false);
+  const [showCosmetics, setShowCosmetics] = useState(false);
+  const [roundScore, setRoundScore] = useState<number | null>(null);
+
+  // Timers
   const [turnTimeLeft, setTurnTimeLeft] = useState(30);
   const [gameTimeLeft, setGameTimeLeft] = useState(30 * 60);
   const turnTimerRef = useRef<NodeJS.Timeout | null>(null);
@@ -147,9 +105,11 @@ const Game = () => {
   const gameRef = useRef<GameState | null>(null);
   const myHandRef = useRef<PlayerHand | null>(null);
   const allPlayersRef = useRef<PlayerHand[]>([]);
+  const afkTimeoutCountRef = useRef<Record<string, number>>({});
 
   const rules: GameRules = lobby?.game_rules ?? defaultRules;
 
+  // ── Auth ──
   useEffect(() => {
     supabase.auth.getSession().then(({ data: { session } }) => {
       if (!session) navigate("/auth");
@@ -164,15 +124,31 @@ const Game = () => {
   useEffect(() => { allPlayersRef.current = allPlayers; }, [allPlayers]);
   useEffect(() => { isMyTurnRef.current = game?.current_turn_user_id === user?.id; }, [game?.current_turn_user_id, user?.id]);
 
-  // Play sound on turn change
+  // Sound on turn change
   useEffect(() => {
-    if (!game || !user) return;
-    if (game.current_turn_user_id === user.id) {
-      playTurnSound();
-      triggerHaptic("light");
-    }
-  }, [game?.current_turn_user_id, user?.id]);
+    if (!game || !user || isSpectator) return;
+    if (game.current_turn_user_id === user.id) { playTurnSound(); triggerHaptic("light"); }
+  }, [game?.current_turn_user_id, user?.id, isSpectator]);
 
+  // ── Game presence for connection indicators & bot takeover ──
+  const handleAfkKick = useCallback(async (afkUserId: string) => {
+    if (!game || !lobby) return;
+    const isHost = lobby.created_by === user?.id;
+    if (!isHost) return;
+    toast.warning(`Player kicked for AFK`);
+    // Just auto-play for them instead of actually removing
+  }, [game, lobby, user]);
+
+  const { onlinePlayerIds, isPlayerOnline, trackAfkTimeout, resetAfkCount } = useGamePresence({
+    roomId: id,
+    userId: user?.id,
+    allPlayerIds: allPlayers.map(p => p.user_id),
+    isMyTurn: game?.current_turn_user_id === user?.id,
+    onBotPlay: () => {},
+    onAfkKick: handleAfkKick,
+  });
+
+  // ── Init ──
   useEffect(() => {
     if (!id || !user) return;
     let gameChannel: any;
@@ -181,36 +157,31 @@ const Game = () => {
 
     const init = async () => {
       setInitError(null);
-      const toPromise = <T,>(thenable: any) => new Promise<T>((resolve, reject) => thenable.then(resolve, reject));
       const withTimeout = async <T,>(thenable: any, ms: number, label: string): Promise<T> => {
-        const promise = toPromise<T>(thenable);
+        const promise = new Promise<T>((resolve, reject) => thenable.then(resolve, reject));
         return await Promise.race([
           promise,
-          new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms)),
+          new Promise<T>((_, reject) => setTimeout(() => reject(new Error(`${label} timed out`)), ms)),
         ]);
       };
 
       let gameData: any = null;
-      let gameError: any = null;
       try {
         const res = await withTimeout(
           supabase.from("games").select("*").eq("lobby_id", id).order("created_at", { ascending: false }).limit(1).maybeSingle(),
           8000, "Load game"
         );
         gameData = (res as any).data;
-        gameError = (res as any).error;
-      } catch (e: any) {
-        setInitError("Network timeout while loading game.");
-        return;
-      }
+        if ((res as any).error) { setInitError("Failed to load game state."); return; }
+      } catch { setInitError("Network timeout while loading game."); return; }
 
       if (!mounted) return;
-      if (gameError) { setInitError("Failed to load game state."); return; }
       if (!gameData) { toast.error("No game found"); navigate(`/lobby/${id}`); return; }
 
       setGame(normalizeGameState(gameData as GameStateRaw));
       const gameId = gameData.id as string;
 
+      // Check if user is a spectator (not in player_hands)
       const fetchMyHand = async () => {
         try {
           const res = await withTimeout(
@@ -222,7 +193,7 @@ const Game = () => {
         } catch { return null; }
       };
 
-      let retries = 20;
+      let retries = 15;
       let my: PlayerHand | null = await fetchMyHand();
       while (mounted && !my && retries-- > 0) {
         await new Promise(r => setTimeout(r, 500));
@@ -230,27 +201,30 @@ const Game = () => {
       }
 
       if (!mounted) return;
-      if (!my) { setInitError("Couldn't load your hand. Go back to lobby."); return; }
-      setMyHand(my);
+      if (!my) {
+        // User is a spectator
+        setIsSpectator(true);
+        setMyHand(null);
+      } else {
+        setMyHand(my);
+      }
 
       const loadAllHands = async () => {
         const { data: handsJoined, error: joinedErr } = await supabase
           .from("player_hands").select("*, profiles(username)").eq("game_id", gameId).order("position");
-
         if (!mounted) return;
         if (!joinedErr && handsJoined) {
           const normalized = (handsJoined as PlayerHandRaw[]).map(normalizePlayerHand);
           setAllPlayers(normalized);
-          const mine = normalized.find(h => h.user_id === user.id);
-          if (mine) setMyHand(mine);
+          if (!isSpectator) {
+            const mine = normalized.find(h => h.user_id === user.id);
+            if (mine) setMyHand(mine);
+          }
           return;
         }
-
         const { data: handsRaw, error: rawErr } = await supabase
           .from("player_hands").select("*").eq("game_id", gameId).order("position");
-        if (!mounted) return;
-        if (rawErr || !handsRaw) return;
-
+        if (!mounted || rawErr || !handsRaw) return;
         const userIds = Array.from(new Set(handsRaw.map((h: any) => h.user_id)));
         const { data: profiles } = await supabase.from("profiles").select("id, username").in("id", userIds);
         const usernameById = new Map((profiles ?? []).map((p: any) => [p.id, p.username]));
@@ -258,8 +232,10 @@ const Game = () => {
           normalizePlayerHand({ ...h, profiles: { username: usernameById.get(h.user_id) ?? "Player" } })
         );
         setAllPlayers(enriched);
-        const mine = enriched.find(h => h.user_id === user.id);
-        if (mine) setMyHand(mine);
+        if (!isSpectator) {
+          const mine = enriched.find(h => h.user_id === user.id);
+          if (mine) setMyHand(mine);
+        }
       };
 
       await loadAllHands();
@@ -279,13 +255,21 @@ const Game = () => {
     return () => { mounted = false; if (gameChannel) supabase.removeChannel(gameChannel); if (handsChannel) supabase.removeChannel(handsChannel); };
   }, [id, user, navigate]);
 
-  const isMyTurn = game?.current_turn_user_id === user?.id;
+  const isMyTurn = !isSpectator && game?.current_turn_user_id === user?.id;
   const isPaused = !!game?.paused_at;
 
   const autoPlayRef = useRef<() => Promise<void>>(async () => {});
 
+  // ── Helper: safe deck ──
+  const getSafeDeck = (deck: string[], discardPile: string[]): string[] => {
+    if (deck.length > 0) return [...deck];
+    if (discardPile.length <= 1) return [];
+    return shuffle([...discardPile.slice(0, -1)]);
+  };
+
+  // ── Auto-play ──
   const autoPlay = useCallback(async () => {
-    if (!game || !myHand || loading || hasActedThisTurnRef.current) return;
+    if (!game || !myHand || loading || hasActedThisTurnRef.current || isSpectator) return;
     hasActedThisTurnRef.current = true;
     const playableCard = myHand.cards.find(card => canPlayCard(card, game.current_card, game.current_color));
     if (playableCard) {
@@ -302,45 +286,63 @@ const Game = () => {
     } else {
       await drawCard();
     }
-    // Auto-play says UNO when leaving 1 card
     if (myHand.cards.length === 2) {
       await supabase.from("player_hands").update({ has_said_uno: true }).eq("id", myHand.id);
     }
-  }, [game, myHand, loading]);
+  }, [game, myHand, loading, isSpectator]);
 
   useEffect(() => { autoPlayRef.current = autoPlay; }, [autoPlay]);
 
-  // Helper to get safe deck, reshuffling if needed
-  const getSafeDeck = (deck: string[], discardPile: string[]): string[] => {
-    if (deck.length > 0) return [...deck];
-    if (discardPile.length <= 1) return []; // truly exhausted
-    return shuffle([...discardPile.slice(0, -1)]);
-  };
+  // ── Bot takeover for disconnected current-turn player ──
+  useEffect(() => {
+    if (!game || game.status !== "in_progress" || isPaused) return;
+    const currentTurnUser = game.current_turn_user_id;
+    const isHost = lobby?.created_by === user?.id;
+    if (!isHost || currentTurnUser === user?.id) return;
 
+    // If current turn player is offline, auto-play for them after 5s
+    if (!isPlayerOnline(currentTurnUser)) {
+      const timer = setTimeout(async () => {
+        if (hasActedThisTurnRef.current) return;
+        // Host forces a simple auto-play: draw a card for the disconnected player
+        const playerHand = allPlayers.find(p => p.user_id === currentTurnUser);
+        if (!playerHand || !game) return;
+
+        let safeDeck = getSafeDeck([...game.deck], game.discard_pile);
+        if (safeDeck.length > 0) {
+          const drawn = safeDeck.pop()!;
+          await supabase.from("player_hands").update({ cards: [...playerHand.cards, drawn] }).eq("id", playerHand.id);
+        }
+
+        // Advance turn
+        const idx = allPlayers.findIndex(p => p.user_id === currentTurnUser);
+        let next = idx + game.direction;
+        if (next >= allPlayers.length) next = 0;
+        if (next < 0) next = allPlayers.length - 1;
+        await supabase.from("games").update({
+          deck: safeDeck,
+          current_turn_user_id: allPlayers[next].user_id,
+        }).eq("id", game.id);
+      }, 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [game?.current_turn_user_id, onlinePlayerIds, game?.status, isPaused]);
+
+  // ── Play card ──
   const playCard = async (card: string, chosenColor?: CardColor) => {
-    if (!game || !myHand || !isMyTurn || loading || isPaused) return;
+    if (!game || !myHand || !isMyTurn || loading || isPaused || isSpectator) return;
 
     const cardObj = stringToCard(card);
     const isWild = cardObj.type === "wild" || cardObj.type === "wild_draw4";
 
-    if (isWild && !chosenColor) {
-      setSelectedCard(card);
-      setShowColorPicker(true);
-      return;
-    }
-
-    if (!canPlayCard(card, game.current_card, game.current_color)) {
-      toast.error("You can't play that card!");
-      return;
-    }
-
-    // Check end_with_power_card rule
+    if (isWild && !chosenColor) { setSelectedCard(card); setShowColorPicker(true); return; }
+    if (!canPlayCard(card, game.current_card, game.current_color)) { toast.error("Can't play that card!"); return; }
     if (!rules.end_with_power_card && myHand.cards.length === 1 && cardObj.type !== "number") {
-      toast.error("Can't end with a power card!");
-      return;
+      toast.error("Can't end with a power card!"); return;
     }
 
     hasActedThisTurnRef.current = true;
+    resetAfkCount(user!.id);
     setLoading(true);
 
     try {
@@ -353,11 +355,8 @@ const Game = () => {
 
       if (cardObj.type === "reverse") {
         newDirection = -game.direction;
-        if (allPlayers.length === 2) {
-          skipNext = true; // 2-player reverse acts as skip
-        } else {
-          nextPlayerIndex = currentPlayerIndex + newDirection;
-        }
+        if (allPlayers.length === 2) skipNext = true;
+        else nextPlayerIndex = currentPlayerIndex + newDirection;
       } else if (cardObj.type === "skip") {
         skipNext = true;
         nextPlayerIndex = currentPlayerIndex + (game.direction * 2);
@@ -375,28 +374,17 @@ const Game = () => {
 
       let deckForUpdate = [...game.deck];
 
-      // Handle draw2 and wild_draw4
       if (cardObj.type === "draw2" || cardObj.type === "wild_draw4") {
         const drawCount = cardObj.type === "draw2" ? 2 : 4;
         const victimHand = allPlayers.find(p => p.user_id === nextPlayer.user_id);
-        
         if (victimHand) {
           let safeDeck = getSafeDeck(deckForUpdate, game.discard_pile);
           const drawnCards: string[] = [];
-          
-          for (let i = 0; i < drawCount; i++) {
-            if (safeDeck.length === 0) break;
-            drawnCards.push(safeDeck.pop()!);
-          }
-          
+          for (let i = 0; i < drawCount; i++) { if (safeDeck.length === 0) break; drawnCards.push(safeDeck.pop()!); }
           await supabase.from("player_hands").update({ cards: [...victimHand.cards, ...drawnCards] }).eq("id", victimHand.id);
           deckForUpdate = safeDeck;
-
-          playAttackSound();
-          triggerHaptic("heavy");
+          playAttackSound(); triggerHaptic("heavy");
         }
-
-        // Draw penalty skip: skip victim's turn
         if (rules.draw_penalty_skip) {
           let skipIdx = nextPlayerIndex + newDirection;
           if (skipIdx >= allPlayers.length) skipIdx = skipIdx % allPlayers.length;
@@ -408,146 +396,134 @@ const Game = () => {
       const finalNextPlayer = allPlayers[nextPlayerIndex];
 
       const updateData: any = {
-        current_card: card,
-        current_color: isWild ? chosenColor : cardObj.color,
-        direction: newDirection,
-        current_turn_user_id: finalNextPlayer.user_id,
-        discard_pile: [...game.discard_pile, card],
-        deck: deckForUpdate,
+        current_card: card, current_color: isWild ? chosenColor : cardObj.color,
+        direction: newDirection, current_turn_user_id: finalNextPlayer.user_id,
+        discard_pile: [...game.discard_pile, card], deck: deckForUpdate,
       };
 
       if (playerWins) {
+        // Calculate round score
+        const score = allPlayers
+          .filter(p => p.user_id !== user?.id)
+          .reduce((sum, p) => sum + p.cards.reduce((s, c) => s + getCardPoints(c), 0), 0);
+        setRoundScore(score);
+
         updateData.status = "completed";
         updateData.winner_id = user?.id;
         setGameEndReason("winner");
         await supabase.from("lobbies").update({ status: "waiting" }).eq("id", id);
-        playWinSound();
-        triggerHaptic("heavy");
+
+        // Update stats
+        try {
+          const { data: existingStats } = await supabase.from("player_stats").select("*").eq("user_id", user!.id).maybeSingle();
+          if (existingStats) {
+            await supabase.from("player_stats").update({
+              games_won: (existingStats.games_won || 0) + 1,
+              games_played: (existingStats.games_played || 0) + 1,
+            }).eq("user_id", user!.id);
+          } else {
+            await supabase.from("player_stats").insert({ user_id: user!.id, games_won: 1, games_played: 1 });
+          }
+          // Update other players' games_played
+          for (const p of allPlayers.filter(pl => pl.user_id !== user!.id)) {
+            const { data: ps } = await supabase.from("player_stats").select("*").eq("user_id", p.user_id).maybeSingle();
+            if (ps) await supabase.from("player_stats").update({ games_played: (ps.games_played || 0) + 1 }).eq("user_id", p.user_id);
+            else await supabase.from("player_stats").insert({ user_id: p.user_id, games_played: 1 });
+          }
+        } catch {}
+
+        playWinSound(); triggerHaptic("heavy");
       }
 
       await supabase.from("games").update(updateData).eq("id", game.id);
-
-      playCardSound();
-      setSelectedCard(null);
-      setShowColorPicker(false);
-
+      playCardSound(); setSelectedCard(null); setShowColorPicker(false);
       if (playerWins) toast.success("🎉 You won!");
     } catch (error: any) {
       console.error("Error playing card:", error);
       toast.error("Failed to play card");
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
+  // ── Draw card ──
   const drawCard = async () => {
-    if (!game || !myHand || !isMyTurn || loading || isPaused) return;
+    if (!game || !myHand || !isMyTurn || loading || isPaused || isSpectator) return;
     hasActedThisTurnRef.current = true;
+    resetAfkCount(user!.id);
     setLoading(true);
 
     try {
       let newDeck = getSafeDeck(game.deck, game.discard_pile);
-      
       if (newDeck.length === 0) {
         toast.error("No cards left to draw!");
-        // Move to next player anyway
         const currentPlayerIndex = allPlayers.findIndex(p => p.user_id === user?.id);
         let nextPlayerIndex = currentPlayerIndex + game.direction;
         if (nextPlayerIndex >= allPlayers.length) nextPlayerIndex = 0;
         if (nextPlayerIndex < 0) nextPlayerIndex = allPlayers.length - 1;
         await supabase.from("games").update({ current_turn_user_id: allPlayers[nextPlayerIndex].user_id }).eq("id", game.id);
-        setLoading(false);
-        return;
+        setLoading(false); return;
       }
 
       const drawnCard = newDeck.pop()!;
       const newHand = [...myHand.cards, drawnCard];
-      
       await supabase.from("player_hands").update({ cards: newHand }).eq("id", myHand.id);
-      
+
       const currentPlayerIndex = allPlayers.findIndex(p => p.user_id === user?.id);
       let nextPlayerIndex = currentPlayerIndex + game.direction;
       if (nextPlayerIndex >= allPlayers.length) nextPlayerIndex = 0;
       if (nextPlayerIndex < 0) nextPlayerIndex = allPlayers.length - 1;
-      
-      // Force play rule: if drawn card is playable, auto-play it (or let player keep)
-      // For now just move to next player
+
       await supabase.from("games").update({
         deck: newDeck,
         discard_pile: game.deck.length === 0 ? [game.discard_pile[game.discard_pile.length - 1]] : game.discard_pile,
         current_turn_user_id: allPlayers[nextPlayerIndex].user_id
       }).eq("id", game.id);
-      
-      playDrawSound();
-      toast.success("Drew a card");
+
+      playDrawSound(); toast.success("Drew a card");
     } catch (error: any) {
       console.error("Error drawing card:", error);
       toast.error("Failed to draw card");
-    } finally {
-      setLoading(false);
-    }
+    } finally { setLoading(false); }
   };
 
   const sayUno = async () => {
-    if (!myHand || myHand.cards.length !== 1) return;
+    if (!myHand || myHand.cards.length !== 1 || isSpectator) return;
     await supabase.from("player_hands").update({ has_said_uno: true }).eq("id", myHand.id);
-    playUnoSound();
-    toast.success("UNO!");
+    playUnoSound(); toast.success("UNO!");
   };
 
-  // UNO Catch: catch a player who has 1 card and hasn't said UNO
   const catchPlayer = async (targetPlayer: PlayerHand) => {
-    if (!game || !rules.catch_uno_penalty) return;
+    if (!game || !rules.catch_uno_penalty || isSpectator) return;
     if (targetPlayer.cards.length !== 1 || targetPlayer.has_said_uno) return;
     if (targetPlayer.user_id === user?.id) return;
-
-    // Give them 2 penalty cards
     let safeDeck = getSafeDeck([...game.deck], game.discard_pile);
     const penaltyCards: string[] = [];
-    for (let i = 0; i < 2; i++) {
-      if (safeDeck.length === 0) break;
-      penaltyCards.push(safeDeck.pop()!);
-    }
-
+    for (let i = 0; i < 2; i++) { if (safeDeck.length === 0) break; penaltyCards.push(safeDeck.pop()!); }
     await supabase.from("player_hands").update({ cards: [...targetPlayer.cards, ...penaltyCards] }).eq("id", targetPlayer.id);
     await supabase.from("games").update({ deck: safeDeck }).eq("id", game.id);
     toast.success(`Caught ${targetPlayer.profiles.username}! +2 penalty cards`);
   };
 
-  // Pause system
+  // ── Pause system ──
   const pauseGame = async () => {
     if (!game || !lobby || lobby.created_by !== user?.id) return;
-    const duration = parseInt(pauseDuration);
-    await supabase.from("games").update({
-      paused_at: new Date().toISOString(),
-      pause_duration_minutes: duration,
-      pause_ready_players: [],
-    }).eq("id", game.id);
-    setShowPauseDialog(false);
-    toast.info("Game paused");
+    await supabase.from("games").update({ paused_at: new Date().toISOString(), pause_duration_minutes: parseInt(pauseDuration), pause_ready_players: [] }).eq("id", game.id);
+    setShowPauseDialog(false); toast.info("Game paused");
   };
 
   const readyToResume = async () => {
     if (!game || !user) return;
     const currentReady = game.pause_ready_players || [];
     if (currentReady.includes(user.id)) return;
-    await supabase.from("games").update({
-      pause_ready_players: [...currentReady, user.id],
-    }).eq("id", game.id);
+    await supabase.from("games").update({ pause_ready_players: [...currentReady, user.id] }).eq("id", game.id);
   };
 
   const resumeGame = async () => {
     if (!game) return;
-    await supabase.from("games").update({
-      paused_at: null,
-      pause_duration_minutes: null,
-      pause_ready_players: [],
-    }).eq("id", game.id);
+    await supabase.from("games").update({ paused_at: null, pause_duration_minutes: null, pause_ready_players: [] }).eq("id", game.id);
   };
 
   const endGameWithRankings = useCallback(async () => {
-    if (!game || game.status === "completed") return;
-    if (gameEndedRef.current) return;
+    if (!game || game.status === "completed" || gameEndedRef.current) return;
     const isHostClient = lobbyRef.current?.created_by === userRef.current?.id;
     setGameEndReason("timeout");
     if (isHostClient) {
@@ -559,26 +535,20 @@ const Game = () => {
         await supabase.from("games").update({ status: "completed", winner_id: winner?.user_id || null }).eq("id", game.id);
         await supabase.from("lobbies").update({ status: "waiting" }).eq("id", id);
         toast.info("⏱️ Time's up!");
-      } catch (error) {
-        console.error("Error ending game:", error);
-        gameEndedRef.current = false;
-      } finally {
-        setLoading(false);
-      }
+      } catch { gameEndedRef.current = false; } finally { setLoading(false); }
     }
   }, [game, allPlayers, id]);
 
   const backToLobby = useCallback(async () => {
     if (!id || !game) return;
     const isHostClient = lobby?.created_by === user?.id;
-    if (game.status === "in_progress") { navigate(`/lobby/${id}`); return; }
     navigate(`/lobby/${id}`);
-    if (isHostClient) {
+    if (isHostClient && game.status === "completed") {
       try {
         await supabase.from("player_hands").delete().eq("game_id", game.id);
         await supabase.from("games").delete().eq("id", game.id);
         await supabase.from("lobbies").update({ status: "waiting" }).eq("id", id);
-      } catch (error) { console.error("Error cleaning up:", error); }
+      } catch {}
     }
   }, [id, game, navigate, lobby, user]);
 
@@ -597,16 +567,12 @@ const Game = () => {
     if (!id) return;
     const fetchLobby = async () => {
       const { data } = await supabase.from("lobbies").select("id, created_by, turn_time_seconds, game_time_minutes, game_rules").eq("id", id).single();
-      if (data) {
-        setLobby(data as any);
-        setTurnTimeLeft(data.turn_time_seconds ?? 30);
-        setGameTimeLeft((data.game_time_minutes ?? 30) * 60);
-      }
+      if (data) { setLobby(data as any); setTurnTimeLeft(data.turn_time_seconds ?? 30); setGameTimeLeft((data.game_time_minutes ?? 30) * 60); }
     };
     fetchLobby();
   }, [id]);
 
-  // Turn timer
+  // ── Turn timer ──
   useEffect(() => {
     if (!game || game.status === "completed" || isPaused) return;
     const turnUserId = game.current_turn_user_id;
@@ -622,7 +588,8 @@ const Game = () => {
         if (prev <= 0) {
           if (!hasActedThisTurnRef.current && isMyTurnRef.current) {
             hasActedThisTurnRef.current = true;
-            setTimeout(() => { toast.info("⏱️ Turn timed out - auto-playing..."); autoPlayRef.current(); }, 100);
+            trackAfkTimeout(user!.id);
+            setTimeout(() => { toast.info("⏱️ Turn timed out"); autoPlayRef.current(); }, 100);
           }
           return 0;
         }
@@ -630,7 +597,8 @@ const Game = () => {
         if (next <= 5 && next > 0) playTimerWarning();
         if (next <= 0 && !hasActedThisTurnRef.current && isMyTurnRef.current) {
           hasActedThisTurnRef.current = true;
-          setTimeout(() => { toast.info("⏱️ Turn timed out - auto-playing..."); autoPlayRef.current(); }, 200);
+          trackAfkTimeout(user!.id);
+          setTimeout(() => { toast.info("⏱️ Turn timed out"); autoPlayRef.current(); }, 200);
         }
         return next;
       });
@@ -638,15 +606,15 @@ const Game = () => {
     return () => { if (turnTimerRef.current) clearInterval(turnTimerRef.current); };
   }, [game?.current_turn_user_id, game?.status, lobby?.turn_time_seconds, isPaused]);
 
-  // Auto-play toggle
+  // ── Auto-play toggle ──
   useEffect(() => {
-    if (!autoPlayEnabled || !isMyTurn || game?.status === "completed" || loading || isPaused) return;
+    if (!autoPlayEnabled || !isMyTurn || game?.status === "completed" || loading || isPaused || isSpectator) return;
     if (hasActedThisTurnRef.current) return;
     const timeout = setTimeout(() => autoPlay(), 1000);
     return () => clearTimeout(timeout);
-  }, [autoPlayEnabled, isMyTurn, game?.status, loading, autoPlay, isPaused]);
+  }, [autoPlayEnabled, isMyTurn, game?.status, loading, autoPlay, isPaused, isSpectator]);
 
-  // Game timer
+  // ── Game timer ──
   useEffect(() => {
     if (!game || game.status === "completed" || isPaused) return;
     if (gameTimerRef.current) clearInterval(gameTimerRef.current);
@@ -655,10 +623,7 @@ const Game = () => {
         if (prev <= 1) {
           if (gameTimerRef.current) clearInterval(gameTimerRef.current);
           const isHostClient = lobbyRef.current?.created_by === userRef.current?.id;
-          if (isHostClient && !gameEndedRef.current) {
-            gameEndedRef.current = true;
-            setTimeout(() => endGameWithRankings(), 0);
-          }
+          if (isHostClient && !gameEndedRef.current) { gameEndedRef.current = true; setTimeout(() => endGameWithRankings(), 0); }
           return 0;
         }
         return prev - 1;
@@ -669,6 +634,7 @@ const Game = () => {
 
   const isHost = lobby?.created_by === user?.id;
 
+  // ── Error / Loading states ──
   if (initError) {
     return (
       <div className="min-h-screen flex items-center justify-center p-6">
@@ -686,7 +652,7 @@ const Game = () => {
     );
   }
 
-  if (!game || !myHand) {
+  if (!game || (!myHand && !isSpectator)) {
     return (
       <div className="min-h-screen flex items-center justify-center">
         <div className="text-center">
@@ -697,176 +663,138 @@ const Game = () => {
     );
   }
 
-  // Pause overlay
+  // ── Pause overlay ──
   if (isPaused && game.paused_at && game.pause_duration_minutes) {
     return (
       <>
-        <PauseOverlay
-          pausedAt={game.paused_at}
-          pauseDurationMinutes={game.pause_duration_minutes}
-          readyPlayers={game.pause_ready_players}
-          allPlayerIds={allPlayers.map(p => p.user_id)}
-          currentUserId={user?.id ?? ""}
-          isHost={isHost}
-          onReady={readyToResume}
-          onResume={resumeGame}
-        />
+        <PauseOverlay pausedAt={game.paused_at} pauseDurationMinutes={game.pause_duration_minutes}
+          readyPlayers={game.pause_ready_players} allPlayerIds={allPlayers.map(p => p.user_id)}
+          currentUserId={user?.id ?? ""} isHost={isHost} onReady={readyToResume} onResume={resumeGame} />
         {user && <InGameChat lobbyId={id!} userId={user.id} />}
       </>
     );
   }
 
+  // ── Completed ──
   if (game.status === "completed") {
     return (
       <>
-        <GameRankingScreen
-          players={allPlayers}
-          winnerId={game.winner_id}
-          gameEndReason={gameEndReason}
-          autoRestartCountdown={autoRestartCountdown}
-          onBackToLobby={backToLobby}
-          loading={loading}
-        />
+        <GameRankingScreen players={allPlayers} winnerId={game.winner_id} gameEndReason={gameEndReason}
+          autoRestartCountdown={autoRestartCountdown} onBackToLobby={backToLobby} loading={loading}
+          roundScore={roundScore} />
         {user && <InGameChat lobbyId={id!} userId={user.id} />}
       </>
     );
   }
 
-  // Find catchable players (have 1 card, haven't said UNO)
-  const catchablePlayers = rules.catch_uno_penalty
-    ? allPlayers.filter(p => p.user_id !== user?.id && p.cards.length === 1 && !p.has_said_uno)
-    : [];
+  const catchablePlayers = !isSpectator && rules.catch_uno_penalty
+    ? allPlayers.filter(p => p.user_id !== user?.id && p.cards.length === 1 && !p.has_said_uno) : [];
 
+  // ── Main game UI (mobile-first, no-scroll) ──
   return (
-    <div className="min-h-screen flex flex-col p-2 md:p-4 bg-gradient-to-b from-background to-muted/20">
-      <div className="max-w-7xl mx-auto flex flex-col flex-1 gap-2 w-full">
-        {/* Header */}
-        <div className="flex items-center justify-between flex-wrap gap-2">
-          <div className="flex items-center gap-2">
-            <Button variant="outline" size="sm" onClick={backToLobby} disabled={loading}>
-              <ArrowLeft className="w-4 h-4 mr-1" />
-              Back
+    <div className="h-[100dvh] flex flex-col overflow-hidden bg-gradient-to-b from-background to-muted/20">
+      {isSpectator && <SpectatorBanner onLeave={() => navigate(`/lobby/${id}`)} />}
+
+      <div className="flex-1 flex flex-col gap-1 p-2 max-w-7xl mx-auto w-full" style={{ paddingTop: isSpectator ? '2.5rem' : undefined }}>
+        {/* Header - compact */}
+        <div className="flex items-center justify-between flex-shrink-0">
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="sm" onClick={backToLobby} disabled={loading} className="h-8 px-2">
+              <ArrowLeft className="w-4 h-4" />
             </Button>
-            {isHost && (
-              <Button variant="outline" size="sm" onClick={() => setShowPauseDialog(true)}>
-                <Pause className="w-4 h-4 mr-1" />
-                Pause
+            {isHost && !isSpectator && (
+              <Button variant="ghost" size="sm" onClick={() => setShowPauseDialog(true)} className="h-8 px-2">
+                <Pause className="w-3 h-3" />
               </Button>
             )}
           </div>
-          
-          <div className="flex items-center gap-2">
+
+          <div className="flex items-center gap-1">
+            <Button variant="ghost" size="sm" onClick={() => setShowCosmetics(true)} className="h-8 px-2">
+              <Sparkles className="w-3 h-3" />
+            </Button>
             <SoundToggle />
-            <AutoPlayToggle enabled={autoPlayEnabled} onToggle={setAutoPlayEnabled} />
-            <GameTimers
-              turnTimeLeft={turnTimeLeft}
-              turnTimeTotal={lobby?.turn_time_seconds ?? 30}
-              gameTimeLeft={gameTimeLeft}
-              isMyTurn={isMyTurn}
-            />
+            {!isSpectator && <AutoPlayToggle enabled={autoPlayEnabled} onToggle={setAutoPlayEnabled} />}
+            <GameTimers turnTimeLeft={turnTimeLeft} turnTimeTotal={lobby?.turn_time_seconds ?? 30} gameTimeLeft={gameTimeLeft} isMyTurn={isMyTurn} />
           </div>
         </div>
 
-        {/* Catch UNO alert */}
+        {/* Catch UNO */}
         {catchablePlayers.length > 0 && (
-          <div className="flex items-center justify-center gap-2 flex-wrap">
+          <div className="flex items-center justify-center gap-2 flex-shrink-0">
             {catchablePlayers.map(p => (
-              <Button
-                key={p.id}
-                size="sm"
-                variant="destructive"
-                onClick={() => catchPlayer(p)}
-                className="animate-pulse"
-              >
-                <AlertTriangle className="w-3 h-3 mr-1" />
-                Catch {p.profiles.username}!
+              <Button key={p.id} size="sm" variant="destructive" onClick={() => catchPlayer(p)} className="animate-pulse text-xs h-7">
+                <AlertTriangle className="w-3 h-3 mr-1" />Catch {p.profiles.username}!
               </Button>
             ))}
           </div>
         )}
 
-        {/* Table */}
-        <TablePlayerLayout
-          players={allPlayers}
-          currentUserId={user?.id ?? ""}
-          currentTurnUserId={game.current_turn_user_id}
-          direction={game.direction}
-          hostId={lobby?.created_by}
-          autoPlayEnabled={autoPlayEnabled}
-        />
+        {/* Table - takes available space */}
+        <div className="flex-1 flex items-center justify-center min-h-0">
+          <TablePlayerLayout
+            players={allPlayers}
+            currentUserId={user?.id ?? ""}
+            currentTurnUserId={game.current_turn_user_id}
+            direction={game.direction}
+            hostId={lobby?.created_by}
+            autoPlayEnabled={autoPlayEnabled}
+            onlinePlayerIds={onlinePlayerIds}
+            isSpectator={isSpectator}
+          />
+        </div>
 
-        {/* Game Center */}
-        <Card className="border-2 border-amber-900/50 bg-gradient-to-br from-emerald-900/30 to-emerald-800/20 shadow-xl">
-          <CardContent className="p-4">
-            <div className="flex items-center justify-center gap-6">
-              <div className="text-center space-y-1">
-                <div className="text-xs text-muted-foreground font-medium">Draw</div>
-                <Button
-                  onClick={drawCard}
-                  disabled={!isMyTurn || loading}
-                  variant="outline"
-                  className="w-16 h-24 rounded-xl bg-gradient-to-br from-gray-800 to-gray-900 border-2 border-gray-600 hover:border-primary hover:scale-105 transition-all shadow-lg"
-                >
-                  <div className="text-center">
-                    <div className="text-2xl">🎴</div>
-                    <div className="text-xs font-bold text-primary">{game.deck.length}</div>
-                  </div>
-                </Button>
+        {/* Game center - draw & discard */}
+        <div className="flex-shrink-0 flex items-center justify-center gap-4 py-1">
+          <div className="text-center">
+            <AnimatedDrawPile onClick={drawCard} disabled={!isMyTurn || loading || isSpectator} deckSize={game.deck.length} />
+          </div>
+          <div className="text-center">
+            <AnimatedDiscardCard card={game.current_card} />
+            {game.current_color && (
+              <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-card/80 border border-border mt-1">
+                <div className={`w-2.5 h-2.5 rounded-full ${
+                  game.current_color === 'red' ? 'bg-red-500' : game.current_color === 'blue' ? 'bg-blue-500' :
+                  game.current_color === 'green' ? 'bg-green-500' : 'bg-yellow-500'
+                }`} />
+                <span className="text-xs font-medium capitalize">{game.current_color}</span>
               </div>
+            )}
+          </div>
+        </div>
 
-              <div className="text-center space-y-1">
-                <div className="text-xs text-muted-foreground font-medium">Current</div>
-                <div className="transform hover:scale-105 transition-transform">
-                  <UnoCard card={game.current_card} size="md" />
-                </div>
-                {game.current_color && (
-                  <div className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-card/80 border border-border">
-                    <div className={`w-3 h-3 rounded-full ${
-                      game.current_color === 'red' ? 'bg-red-500' :
-                      game.current_color === 'blue' ? 'bg-blue-500' :
-                      game.current_color === 'green' ? 'bg-green-500' : 'bg-yellow-500'
-                    }`} />
-                    <span className="text-xs font-medium capitalize">{game.current_color}</span>
-                  </div>
-                )}
-              </div>
-            </div>
-          </CardContent>
-        </Card>
-
-        {/* My Hand */}
-        <Card className="gradient-card border-border shadow-lg">
-          <CardHeader className="pb-1 pt-2 px-3">
-            <div className="flex items-center justify-between">
-              <CardTitle className="text-sm flex items-center gap-1">
-                Your Hand
-                <span className="text-xs font-normal text-muted-foreground">({myHand.cards.length})</span>
-              </CardTitle>
+        {/* My Hand - compact, scrollable horizontally */}
+        {!isSpectator && myHand && (
+          <div className="flex-shrink-0 bg-card/50 rounded-xl border border-border p-2">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs font-semibold text-muted-foreground">Your Hand ({myHand.cards.length})</span>
               {myHand.cards.length === 1 && !myHand.has_said_uno && (
-                <Button onClick={sayUno} variant="outline" size="sm" className="text-yellow-500 border-yellow-500 hover:bg-yellow-500/10 animate-pulse text-xs px-2 py-1">
-                  Say UNO! 🔔
+                <Button onClick={sayUno} variant="outline" size="sm" className="text-yellow-500 border-yellow-500 hover:bg-yellow-500/10 animate-pulse text-xs h-6 px-2">
+                  UNO! 🔔
                 </Button>
               )}
             </div>
-          </CardHeader>
-          <CardContent className="px-3 pb-3">
-            <div className="flex flex-wrap gap-1 justify-center">
-              {myHand.cards.map((card, index) => {
-                const isPlayable = isMyTurn && !loading && canPlayCard(card, game.current_card, game.current_color);
-                return (
-                  <div
-                    key={`${card}-${index}`}
-                    className={`transform transition-all duration-200 ${
-                      isPlayable ? "hover:-translate-y-2 hover:scale-105 cursor-pointer" : "opacity-60"
-                    }`}
-                  >
-                    <UnoCard card={card} onClick={() => playCard(card)} disabled={!isPlayable} size="sm" />
-                  </div>
-                );
-              })}
+            <div className="flex gap-0.5 overflow-x-auto pb-1 justify-center">
+              <AnimatePresence mode="popLayout">
+                {myHand.cards.map((card, index) => {
+                  const isPlayable = isMyTurn && !loading && canPlayCard(card, game.current_card, game.current_color);
+                  return (
+                    <AnimatedCard
+                      key={`${card}-${index}`}
+                      card={card}
+                      onClick={() => playCard(card)}
+                      disabled={!isPlayable}
+                      size="sm"
+                      index={index}
+                      total={myHand.cards.length}
+                      isPlayable={isPlayable}
+                    />
+                  );
+                })}
+              </AnimatePresence>
             </div>
-          </CardContent>
-        </Card>
+          </div>
+        )}
       </div>
 
       {/* Color Picker Dialog */}
@@ -875,18 +803,12 @@ const Game = () => {
           <DialogHeader><DialogTitle>Choose a color</DialogTitle></DialogHeader>
           <div className="grid grid-cols-2 gap-4">
             {(['red', 'blue', 'green', 'yellow'] as CardColor[]).map(color => (
-              <Button
-                key={color}
-                onClick={() => selectedCard && playCard(selectedCard, color)}
+              <Button key={color} onClick={() => selectedCard && playCard(selectedCard, color)}
                 className={`h-16 text-white font-bold text-lg shadow-lg hover:scale-105 transition-transform ${
-                  color === 'red' ? 'bg-red-600 hover:bg-red-700' :
-                  color === 'blue' ? 'bg-blue-600 hover:bg-blue-700' :
-                  color === 'green' ? 'bg-green-600 hover:bg-green-700' :
-                  'bg-yellow-500 hover:bg-yellow-600 text-yellow-950'
+                  color === 'red' ? 'bg-red-600 hover:bg-red-700' : color === 'blue' ? 'bg-blue-600 hover:bg-blue-700' :
+                  color === 'green' ? 'bg-green-600 hover:bg-green-700' : 'bg-yellow-500 hover:bg-yellow-600 text-yellow-950'
                 }`}
-              >
-                {color.toUpperCase()}
-              </Button>
+              >{color.toUpperCase()}</Button>
             ))}
           </div>
         </DialogContent>
@@ -907,19 +829,21 @@ const Game = () => {
                 <SelectItem value="60">60 minutes</SelectItem>
               </SelectContent>
             </Select>
-            <Button onClick={pauseGame} className="w-full gradient-primary">
-              <Pause className="w-4 h-4 mr-2" /> Pause Game
-            </Button>
+            <Button onClick={pauseGame} className="w-full gradient-primary"><Pause className="w-4 h-4 mr-2" /> Pause Game</Button>
           </div>
         </DialogContent>
       </Dialog>
 
-      {/* Emoticons & Quick Chat & In-game chat */}
+      {/* Cosmetics */}
+      <CosmeticsDialog open={showCosmetics} onOpenChange={setShowCosmetics} />
+
+      {/* Floating controls */}
       {user && (
         <>
           <EmoticonThrower lobbyId={id!} userId={user.id} />
           <QuickChat lobbyId={id!} userId={user.id} />
           <InGameChat lobbyId={id!} userId={user.id} />
+          <ActionLog lobbyId={id!} />
         </>
       )}
     </div>

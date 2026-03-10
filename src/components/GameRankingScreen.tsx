@@ -8,9 +8,7 @@ interface Player {
   cards: string[];
   position: number;
   has_said_uno: boolean;
-  profiles: {
-    username: string;
-  };
+  profiles: { username: string };
 }
 
 interface GameRankingScreenProps {
@@ -20,22 +18,15 @@ interface GameRankingScreenProps {
   autoRestartCountdown: number;
   onBackToLobby: () => void;
   loading: boolean;
+  roundScore?: number | null;
 }
 
 export const GameRankingScreen = ({
-  players,
-  winnerId,
-  gameEndReason,
-  autoRestartCountdown,
-  onBackToLobby,
-  loading,
+  players, winnerId, gameEndReason, autoRestartCountdown, onBackToLobby, loading, roundScore,
 }: GameRankingScreenProps) => {
-  // Sort players by card count (fewer cards = better rank)
   const rankedPlayers = [...players].sort((a, b) => {
-    // Winner always first
     if (a.user_id === winnerId) return -1;
     if (b.user_id === winnerId) return 1;
-    // Then by card count
     return a.cards.length - b.cards.length;
   });
 
@@ -61,82 +52,57 @@ export const GameRankingScreen = ({
             <>
               <div className="text-5xl mb-2">⏱️</div>
               <CardTitle className="text-2xl md:text-3xl">Time's Up!</CardTitle>
-              <p className="text-muted-foreground mt-2">
-                Game ended - Rankings based on cards remaining
-              </p>
+              <p className="text-muted-foreground mt-2">Rankings based on cards remaining</p>
             </>
           ) : (
             <>
               <div className="text-5xl mb-2">🏆</div>
               <CardTitle className="text-2xl md:text-3xl">Game Over!</CardTitle>
+              {roundScore != null && roundScore > 0 && (
+                <p className="text-primary font-bold mt-1">Round Score: +{roundScore} pts</p>
+              )}
             </>
           )}
         </CardHeader>
-        
+
         <CardContent className="space-y-4">
-          {/* Rankings list */}
           <div className="space-y-2">
             {rankedPlayers.map((player, index) => (
-              <div
-                key={player.id}
-                className={`flex items-center gap-4 p-3 rounded-xl border-2 transition-all ${getRankBg(index)}`}
-              >
-                {/* Rank */}
-                <div className="flex-shrink-0">
-                  {getRankIcon(index)}
-                </div>
-
-                {/* Player info */}
+              <div key={player.id} className={`flex items-center gap-4 p-3 rounded-xl border-2 transition-all ${getRankBg(index)}`}>
+                <div className="flex-shrink-0">{getRankIcon(index)}</div>
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     <div className={`w-10 h-10 rounded-full flex items-center justify-center text-lg font-bold ${
-                      index === 0 
-                        ? "bg-yellow-500 text-yellow-950"
-                        : "bg-muted text-muted-foreground"
+                      index === 0 ? "bg-yellow-500 text-yellow-950" : "bg-muted text-muted-foreground"
                     }`}>
                       {player.profiles.username.charAt(0).toUpperCase()}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className={`font-semibold truncate ${
-                        index === 0 ? "text-yellow-500" : "text-foreground"
-                      }`}>
+                      <p className={`font-semibold truncate ${index === 0 ? "text-yellow-500" : "text-foreground"}`}>
                         {player.profiles.username}
-                        {player.user_id === winnerId && gameEndReason === "winner" && (
-                          <span className="ml-2 text-sm">🎉 Winner!</span>
-                        )}
+                        {player.user_id === winnerId && gameEndReason === "winner" && <span className="ml-2 text-sm">🎉 Winner!</span>}
                       </p>
                     </div>
                   </div>
                 </div>
-
-                {/* Cards remaining */}
                 <div className="flex-shrink-0 text-right">
                   <span className={`text-lg font-bold ${
-                    player.cards.length === 0 
-                      ? "text-green-500" 
-                      : player.cards.length <= 2 
-                        ? "text-yellow-500" 
-                        : "text-muted-foreground"
-                  }`}>
-                    {player.cards.length}
-                  </span>
+                    player.cards.length === 0 ? "text-accent" : player.cards.length <= 2 ? "text-yellow-500" : "text-muted-foreground"
+                  }`}>{player.cards.length}</span>
                   <span className="text-xs text-muted-foreground ml-1">cards</span>
                 </div>
               </div>
             ))}
           </div>
 
-          {/* Auto-restart countdown */}
           <div className="flex items-center justify-center gap-2 text-muted-foreground py-2">
             <RefreshCw className="w-4 h-4 animate-spin" />
             <span>Returning to lobby in <strong className="text-primary">{autoRestartCountdown}s</strong></span>
           </div>
 
-          {/* Back to lobby button */}
           <div className="flex justify-center">
             <Button onClick={onBackToLobby} className="gradient-primary" disabled={loading}>
-              <ArrowLeft className="w-4 h-4 mr-2" />
-              {loading ? "Returning..." : "Back to Lobby Now"}
+              <ArrowLeft className="w-4 h-4 mr-2" />{loading ? "Returning..." : "Back to Lobby Now"}
             </Button>
           </div>
         </CardContent>
